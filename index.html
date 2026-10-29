@@ -486,11 +486,14 @@ async function loadMB() {
 }
 
 // ---------- Môi trường ----------
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
 const hasGPU = !!navigator.gpu;
-const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
-$('model').value = (!isMobile && hasGPU) ? 'onnx-community/whisper-small' : 'onnx-community/whisper-base';
-$('envNote').textContent = hasGPU
+$('model').value = isIOS ? 'onnx-community/whisper-tiny'
+  : (!isMobile && hasGPU) ? 'onnx-community/whisper-small' : 'onnx-community/whisper-base';
+$('envNote').textContent = isIOS
+  ? 'iPhone/iPad giới hạn bộ nhớ cho trang web nên mặc định dùng mức "Nhanh nhất". Nếu thiếu bộ nhớ, ứng dụng tự lùi xuống mức nhẹ hơn và chạy lại.'
+  : hasGPU
   ? 'Thiết bị hỗ trợ tăng tốc đồ hoạ (WebGPU) — xử lý sẽ nhanh hơn.'
   : 'Thiết bị không có WebGPU — vẫn chạy được nhưng chậm hơn (video 20 phút có thể mất 20–60 phút trên điện thoại).';
 
@@ -611,6 +614,30 @@ function getWorker() {
   return worker;
 }
 
+const MODEL_ORDER = ['onnx-community/whisper-large-v3-turbo', 'onnx-community/whisper-small', 'onnx-community/whisper-base', 'onnx-community/whisper-tiny'];
+const MODEL_LABEL = { 'onnx-community/whisper-tiny': 'Nhanh nhất', 'onnx-community/whisper-base': 'Cân bằng', 'onnx-community/whisper-small': 'Chính xác', 'onnx-community/whisper-large-v3-turbo': 'Rất chính xác' };
+const isOOM = (e) => /out of memory|error code = 6|OrtRun|RangeError|allocation|memory access|Aborted|bad_alloc/i.test(String(e?.message || e));
+
+function runAI(audio, model) {
+  const w = getWorker();
+  return new Promise((resolve, reject) => {
+    w.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.type === 'status') { $('stage').textContent = m.stage; $('sub').textContent = ''; setBar('bar', 0, !!m.indet); }
+      else if (m.type === 'dl') { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; }
+      else if (m.type === 'progress') { setBar('bar', m.value); $('sub').textContent = `${Math.round(m.value * 100)}%` + (m.eta != null ? ` · còn khoảng ${fmtDur(m.eta)}` : ''); }
+      else if (m.type === 'detected') { state.lang = m.lang; }
+      else if (m.type === 'note') { $('sub').textContent = m.text; }
+      else if (m.type === 'device') { console.log('Thiết bị chạy AI:', m.device); }
+      else if (m.type === 'result') resolve(m);
+      else if (m.type === 'error') reject(new Error(m.message));
+    };
+    // Lỗi không bắt được trong worker (thường là tràn bộ nhớ làm worker chết)
+    w.onerror = (e) => reject(new Error(e.message || 'Out of memory'));
+    w.postMessage({ cmd: 'run', audio, model, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS }, [audio.buffer]);
+  });
+}
+
 $('go').addEventListener('click', async () => {
   if (!state.file) return;
   $('go').disabled = true;
@@ -618,37 +645,41 @@ $('go').addEventListener('click', async () => {
   $('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
   keepAwake(true);
   const t0 = performance.now();
+  let model = $('model').value;
   try {
-    $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
-    setBar('bar', 0);
-    const audio = await extractAudio(state.file, (p) => setBar('bar', p));
-    const w = getWorker();
-    const result = await new Promise((resolve, reject) => {
-      w.onmessage = (ev) => {
-        const m = ev.data;
-        if (m.type === 'status') { $('stage').textContent = m.stage; $('sub').textContent = ''; setBar('bar', 0, !!m.indet); }
-        else if (m.type === 'dl') { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; }
-        else if (m.type === 'progress') { setBar('bar', m.value); $('sub').textContent = `${Math.round(m.value * 100)}%` + (m.eta != null ? ` · còn khoảng ${fmtDur(m.eta)}` : ''); }
-        else if (m.type === 'detected') { state.lang = m.lang; }
-        else if (m.type === 'note') { $('sub').textContent = m.text; }
-        else if (m.type === 'device') { console.log('Thiết bị chạy AI:', m.device); }
-        else if (m.type === 'result') resolve(m);
-        else if (m.type === 'error') reject(new Error(m.message));
-      };
-      w.onerror = (e) => reject(new Error(e.message || 'Lỗi khi chạy mô hình AI'));
-      w.postMessage({ cmd: 'run', audio, model: $('model').value, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS }, [audio.buffer]);
-    });
+    let result = null;
+    while (!result) {
+      $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
+      setBar('bar', 0);
+      const audio = await extractAudio(state.file, (p) => setBar('bar', p));
+      try {
+        result = await runAI(audio, model);
+      } catch (e) {
+        // Tràn bộ nhớ → làm mới bộ xử lý và thử lại với mô hình nhẹ hơn
+        worker?.terminate(); worker = null;
+        const next = MODEL_ORDER[MODEL_ORDER.indexOf(model) + 1];
+        if (!isOOM(e) || !next) throw e;
+        console.warn('OOM với', model, '→ thử', next, e);
+        model = next;
+        $('model').value = model;
+        $('stage').textContent = `Thiết bị thiếu bộ nhớ — đang thử lại với mức "${MODEL_LABEL[model]}"…`;
+        await new Promise(r => setTimeout(r, 800));   // cho trình duyệt kịp giải phóng bộ nhớ
+      }
+    }
     state.segments = result.segments;
     state.lang = result.lang;
     $('stage').textContent = `Hoàn tất sau ${fmtDur((performance.now() - t0) / 1000)}`;
-    $('sub').textContent = `${state.segments.length} câu phụ đề`;
+    $('sub').textContent = `${state.segments.length} câu phụ đề · mức "${MODEL_LABEL[model]}"`;
     setBar('bar', 1);
     openEditor();
   } catch (e) {
     console.error(e);
-    $('runErr').textContent = 'Lỗi: ' + (e.message || e) + '\nGợi ý: thử mức chính xác thấp hơn, hoặc dùng Chrome/Edge bản mới.';
+    const oom = isOOM(e);
+    $('runErr').textContent = oom
+      ? 'Thiết bị không đủ bộ nhớ để chạy AI, kể cả ở mức nhẹ nhất.\nGợi ý: đóng bớt các tab/ứng dụng khác rồi thử lại, hoặc dùng máy tính (Chrome/Edge).\n(Chi tiết: ' + (e.message || e) + ')'
+      : 'Lỗi: ' + (e.message || e) + '\nGợi ý: thử mức chính xác thấp hơn, hoặc dùng Chrome/Edge bản mới.';
     show('runErr');
-    worker?.terminate(); worker = null;   // làm mới hoàn toàn để lần thử sau không bị kẹt bộ nhớ
+    worker?.terminate(); worker = null;
   } finally {
     $('go').disabled = false;
     keepAwake(false);
