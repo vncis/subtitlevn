@@ -74,6 +74,9 @@ video{width:100%;max-height:60vh;background:#000;border-radius:12px;display:bloc
 .seg textarea{padding:6px 8px;font-size:15px;resize:vertical;min-height:40px}
 .seg .src{font-size:12px;color:var(--muted);margin-top:3px}
 .done{color:var(--ok);font-weight:600}
+details.edit{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+details.edit summary{cursor:pointer;font-weight:600;padding:6px 0;color:var(--accent)}
+details.edit video{margin-top:10px}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 </style>
 </head>
@@ -132,54 +135,33 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     <div class="bar" id="bar"><i></i></div>
     <div class="sub" id="sub"></div>
     <div class="err hidden" id="runErr"></div>
-    <div class="note">Giữ màn hình mở trong lúc xử lý. Lần đầu cần tải mô hình AI (khoảng 80–600 MB tuỳ mức chính xác); các lần sau dùng lại bản đã lưu.</div>
+    <div class="note">Giữ màn hình mở và không chuyển sang ứng dụng khác trong lúc xử lý. Lần đầu cần tải mô hình AI (khoảng 80–600 MB tuỳ mức chính xác); các lần sau dùng lại bản đã lưu.</div>
   </section>
 
-  <!-- 3. Xem & sửa -->
+  <!-- 3. Kết quả -->
   <section class="card hidden" id="step3">
-    <h2><span class="num">3</span>Xem trước &amp; sửa phụ đề</h2>
+    <h2><span class="num">3</span>Video có phụ đề tiếng Việt</h2>
     <div style="margin-bottom:10px" id="detected"></div>
-    <video id="preview" controls playsinline></video>
-    <div class="segs" id="segs"></div>
-    <div class="grid">
-      <label class="f">Cỡ chữ
-        <select id="fsize">
-          <option value="0.045">Nhỏ</option>
-          <option value="0.056" selected>Vừa</option>
-          <option value="0.07">Lớn</option>
-        </select>
-      </label>
-      <label class="f">Kiểu chữ
-        <select id="fstyle">
-          <option value="box">Chữ trắng, nền đen mờ</option>
-          <option value="outline">Chữ trắng, viền đen</option>
-          <option value="yellow">Chữ vàng, viền đen</option>
-        </select>
-      </label>
-    </div>
-    <div class="row">
-      <button class="btn" id="burn">Lồng phụ đề vào video</button>
-      <button class="btn ghost" id="srt">Tải file phụ đề .srt</button>
-    </div>
-  </section>
-
-  <!-- 4. Xuất -->
-  <section class="card hidden" id="step4">
-    <h2><span class="num">4</span>Video có phụ đề</h2>
-    <div id="burnProg">
-      <div class="stage" id="bstage">Đang lồng phụ đề…</div>
-      <div class="bar" id="bbar"><i></i></div>
-      <div class="sub" id="bsub"></div>
-    </div>
     <div class="err hidden" id="burnErr"></div>
+    <button class="btn block hidden" id="burnBtn">Bấm để lồng phụ đề vào video</button>
     <div id="outBox" class="hidden">
-      <p class="done">Xong! Video đã có phụ đề tiếng Việt.</p>
       <video id="outVideo" controls playsinline></video>
       <div class="row">
         <a class="btn" id="dl" download>Tải video về máy</a>
-        <button class="btn ghost hidden" id="share">Lưu / Chia sẻ (điện thoại)</button>
+        <button class="btn ghost hidden" id="share">Lưu vào Ảnh / Chia sẻ</button>
       </div>
+      <div class="note" id="saveHint"></div>
     </div>
+
+    <details class="edit" id="editBox">
+      <summary>Sửa lời phụ đề (nếu dịch chưa đúng)</summary>
+      <video id="preview" controls playsinline></video>
+      <div class="segs" id="segs"></div>
+      <div class="row">
+        <button class="btn" id="reburn">Lồng lại phụ đề đã sửa</button>
+        <button class="btn ghost" id="srt">Tải file phụ đề .srt</button>
+      </div>
+    </details>
   </section>
 
   <footer>Video không được gửi đi đâu — mọi xử lý diễn ra trên thiết bị của bạn.</footer>
@@ -641,7 +623,7 @@ function runAI(audio, model) {
 $('go').addEventListener('click', async () => {
   if (!state.file) return;
   $('go').disabled = true;
-  show('step2'); show('runErr', false); show('step3', false); show('step4', false);
+  show('step2'); show('runErr', false); show('step3', false); show('outBox', false); show('burnBtn', false); show('burnErr', false); $('editBox').open = false;
   $('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
   keepAwake(true);
   const t0 = performance.now();
@@ -671,7 +653,9 @@ $('go').addEventListener('click', async () => {
     $('stage').textContent = `Hoàn tất sau ${fmtDur((performance.now() - t0) / 1000)}`;
     $('sub').textContent = `${state.segments.length} câu phụ đề · mức "${MODEL_LABEL[model]}"`;
     setBar('bar', 1);
+    worker?.terminate(); worker = null;   // giải phóng bộ nhớ AI trước khi lồng phụ đề (quan trọng trên điện thoại)
     openEditor();
+    await doBurn(false);
   } catch (e) {
     console.error(e);
     const oom = isOOM(e);
@@ -732,8 +716,6 @@ function openEditor() {
     if (i >= 0) { const r = box.children[i]; r?.classList.add('active'); if (r && !box.matches(':focus-within')) box.scrollTop = r.offsetTop - box.offsetTop - 60; }
     lastActive = i;
   };
-  show('step3');
-  $('step3').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 $('srt').addEventListener('click', () => {
@@ -765,9 +747,11 @@ function wrapLines(ctx, text, maxW) {
   return lines;
 }
 
-function drawSub(ctx, W, H, text, style) {
+// Kiểu phụ đề cố định: chữ trắng đậm, viền đen, trên nền đen mờ — dễ đọc trên mọi cảnh
+const SUB_SIZE = 0.056;
+function drawSub(ctx, W, H, text) {
   if (!text || !text.trim()) return;
-  const fs = Math.round(Math.min(W, H) * style.size);
+  const fs = Math.round(Math.min(W, H) * SUB_SIZE);
   ctx.save();
   ctx.font = `600 ${fs}px "Be Vietnam Pro", Arial, "Helvetica Neue", "Segoe UI", Roboto, sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -776,19 +760,14 @@ function drawSub(ctx, W, H, text, style) {
   const y0 = bottom - lh * (lines.length - 1) - lh / 2;
   lines.forEach((ln, i) => {
     const y = y0 + i * lh;
-    if (style.kind === 'box') {
-      const w = ctx.measureText(ln).width + fs * 0.7;
-      ctx.fillStyle = 'rgba(0,0,0,0.62)';
-      ctx.fillRect(W / 2 - w / 2, y - lh / 2, w, lh);
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(ln, W / 2, y);
-    } else {
-      ctx.lineJoin = 'round'; ctx.miterLimit = 2;
-      ctx.lineWidth = Math.max(2, fs * 0.16); ctx.strokeStyle = 'rgba(0,0,0,0.92)';
-      ctx.strokeText(ln, W / 2, y);
-      ctx.fillStyle = style.kind === 'yellow' ? '#ffe14d' : '#ffffff';
-      ctx.fillText(ln, W / 2, y);
-    }
+    const w = ctx.measureText(ln).width + fs * 0.7;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(W / 2 - w / 2, y - lh / 2, w, lh);
+    ctx.lineJoin = 'round'; ctx.miterLimit = 2;
+    ctx.lineWidth = Math.max(2, fs * 0.12); ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(ln, W / 2, y);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(ln, W / 2, y);
   });
   ctx.restore();
 }
@@ -801,7 +780,7 @@ const even = (x) => Math.max(2, Math.round(x / 2) * 2);
 
 
 // ---------- Bước 4a: lồng phụ đề nhanh bằng WebCodecs (Mediabunny) ----------
-async function burnFast(file, segs, style, onProg) {
+async function burnFast(file, segs, onProg) {
   if (typeof VideoEncoder === 'undefined') throw new Error('NO_WEBCODECS');
   const M = await loadMB();
   const probe = new M.Input({ source: new M.BlobSource(file), formats: M.ALL_FORMATS });
@@ -830,7 +809,7 @@ async function burnFast(file, segs, style, onProg) {
         if (typeof sample.draw === 'function') sample.draw(ctx, 0, 0, W, H);
         else ctx.drawImage(sample.toCanvasImageSource(), 0, 0, W, H);
         const i = cueIndex(segs, sample.timestamp);
-        if (i >= 0) drawSub(ctx, W, H, segs[i].vi, style);
+        if (i >= 0) drawSub(ctx, W, H, segs[i].vi);
         return ctx.canvas;
       },
     };
@@ -853,7 +832,7 @@ async function burnFast(file, segs, style, onProg) {
 }
 
 // ---------- Bước 4b: dự phòng — phát & ghi lại theo thời gian thực ----------
-async function burnRealtime(file, segs, style, onProg, audioCtx) {
+async function burnRealtime(file, segs, onProg, audioCtx) {
   const v = document.createElement('video');
   v.playsInline = true; v.preload = 'auto';
   v.src = URL.createObjectURL(file);
@@ -878,7 +857,7 @@ async function burnRealtime(file, segs, style, onProg, audioCtx) {
   const draw = () => {
     ctx.drawImage(v, 0, 0, W, H);
     const i = cueIndex(segs, v.currentTime);
-    if (i >= 0) drawSub(ctx, W, H, segs[i].vi, style);
+    if (i >= 0) drawSub(ctx, W, H, segs[i].vi);
     onProg(v.currentTime / v.duration);
   };
   let running = true;
@@ -896,33 +875,42 @@ async function burnRealtime(file, segs, style, onProg, audioCtx) {
   return new Blob(chunks, { type });
 }
 
-$('burn').addEventListener('click', async () => {
-  // Tạo AudioContext ngay khi bấm (yêu cầu của Safari/Chrome cho phương án dự phòng)
+// Lồng phụ đề. fromTap = true khi người dùng vừa bấm nút (cần cho chế độ dự phòng phát-và-ghi)
+let burning = false;
+async function doBurn(fromTap) {
+  if (burning) return;
+  burning = true;
   let ac = null;
-  try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
-  const style = { size: parseFloat($('fsize').value), kind: $('fstyle').value };
+  if (fromTap) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
   const segs = state.segments.map(s => ({ ...s })).sort((a, b) => a.start - b.start);
-  $('burn').disabled = true;
-  show('step4'); show('burnProg'); show('outBox', false); show('burnErr', false);
-  $('step4').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  show('step2'); show('runErr', false); show('burnErr', false); show('burnBtn', false); show('outBox', false);
+  $('reburn').disabled = true;
   $('preview').pause();
   keepAwake(true);
   const t0 = performance.now();
   const prog = (p) => {
-    setBar('bbar', p);
+    setBar('bar', p);
     const el = (performance.now() - t0) / 1000;
-    $('bsub').textContent = `${Math.round(p * 100)}%` + (p > 0.03 ? ` · còn khoảng ${fmtDur(el / p - el)}` : '');
+    $('sub').textContent = `${Math.round(p * 100)}%` + (p > 0.03 ? ` · còn khoảng ${fmtDur(el / p - el)}` : '');
   };
   try {
     let blob;
+    $('stage').textContent = 'Đang lồng phụ đề vào video…'; $('sub').textContent = ''; setBar('bar', 0);
     try {
-      $('bstage').textContent = 'Đang lồng phụ đề vào video…';
-      blob = await burnFast(state.file, segs, style, prog);
+      blob = await burnFast(state.file, segs, prog);
     } catch (e) {
       console.warn('Fast burn failed → realtime', e);
-      $('bstage').textContent = 'Đang lồng phụ đề (chế độ phát trực tiếp — mất bằng thời lượng video, hãy giữ màn hình mở)…';
-      setBar('bbar', 0);
-      blob = await burnRealtime(state.file, segs, style, prog, ac);
+      if (!fromTap) {
+        // Trình duyệt chỉ cho phát video có tiếng khi người dùng bấm → hiện nút
+        $('stage').textContent = 'Phụ đề đã tạo xong — bấm nút bên dưới để lồng vào video';
+        $('sub').textContent = ''; setBar('bar', 0);
+        show('step3'); show('burnBtn');
+        $('step3').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      $('stage').textContent = 'Đang lồng phụ đề (phát trực tiếp — mất bằng thời lượng video, giữ màn hình mở)…';
+      setBar('bar', 0);
+      blob = await burnRealtime(state.file, segs, prog, ac);
     }
     if (state.outUrl) URL.revokeObjectURL(state.outUrl);
     state.outBlob = blob;
@@ -931,22 +919,32 @@ $('burn').addEventListener('click', async () => {
     const name = `${baseName()}_phude-vi.${ext}`;
     $('dl').href = state.outUrl; $('dl').download = name;
     $('outVideo').src = state.outUrl;
-    show('burnProg', false); show('outBox');
+    $('stage').textContent = 'Xong! Video đã có phụ đề tiếng Việt.';
+    $('sub').textContent = `Tổng thời gian ${fmtDur((performance.now() - t0) / 1000)} để lồng phụ đề`;
+    setBar('bar', 1);
+    show('step3'); show('outBox');
     const f = new File([blob], name, { type: blob.type });
+    show('share', false);
     if (navigator.canShare?.({ files: [f] })) {
       show('share');
       $('share').onclick = () => navigator.share({ files: [f], title: name }).catch(() => {});
     }
+    $('saveHint').textContent = isIOS ? 'Trên iPhone: bấm "Lưu vào Ảnh / Chia sẻ" rồi chọn "Lưu video" để đưa vào ứng dụng Ảnh.' : '';
+    $('step3').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     console.error(e);
-    $('burnErr').textContent = 'Không lồng được phụ đề: ' + (e.message || e) + '\nBạn vẫn có thể tải file .srt và dùng trình phát hỗ trợ phụ đề.';
-    show('burnErr');
+    show('step3');
+    $('burnErr').textContent = 'Không lồng được phụ đề: ' + (e.message || e) + '\nBạn có thể bấm nút bên dưới để thử lại, hoặc tải file .srt trong mục "Sửa lời phụ đề".';
+    show('burnErr'); show('burnBtn');
   } finally {
-    $('burn').disabled = false;
+    burning = false;
+    $('reburn').disabled = false;
     keepAwake(false);
     try { ac && ac.state !== 'closed' && ac.close(); } catch {}
   }
-});
+}
+$('burnBtn').addEventListener('click', () => doBurn(true));
+$('reburn').addEventListener('click', () => doBurn(true));
 </script>
 </body>
 </html>
