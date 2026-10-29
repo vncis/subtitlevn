@@ -74,17 +74,6 @@ video{width:100%;max-height:60vh;background:#000;border-radius:12px;display:bloc
 .seg textarea{padding:6px 8px;font-size:15px;resize:vertical;min-height:40px}
 .seg .src{font-size:12px;color:var(--muted);margin-top:3px}
 .done{color:var(--ok);font-weight:600}
-.player{position:relative;background:#000;border-radius:12px;overflow:hidden}
-.player canvas{display:block;width:100%;max-height:60vh;object-fit:contain;background:#000}
-.player video{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:0;top:0}
-.pctl{display:flex;align-items:center;gap:10px;padding:8px 10px;background:#111;color:#eee}
-.pbtn{width:40px;height:40px;border-radius:50%;border:0;background:var(--accent);color:var(--accent-ink);font-size:16px;cursor:pointer;flex:none}
-.pctl input[type=range]{flex:1;accent-color:var(--accent)}
-.ptime{font-size:13px;font-variant-numeric:tabular-nums;min-width:86px;text-align:right}
-.oldsub{margin-top:14px;padding:14px;border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;gap:10px}
-#cctl{display:flex;flex-direction:column;gap:10px}
-#cctl.hidden{display:none!important}
-input[type=range]{width:100%;accent-color:var(--accent)}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 </style>
 </head>
@@ -150,40 +139,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
   <section class="card hidden" id="step3">
     <h2><span class="num">3</span>Xem trước &amp; sửa phụ đề</h2>
     <div style="margin-bottom:10px" id="detected"></div>
-    <div class="player">
-      <canvas id="pv"></canvas>
-      <video id="preview" playsinline preload="auto"></video>
-      <div class="pctl">
-        <button class="pbtn" id="pplay" aria-label="Phát / Dừng">▶</button>
-        <input type="range" id="pseek" min="0" max="1000" value="0" step="1" aria-label="Tua video">
-        <span class="ptime" id="ptime">0:00</span>
-      </div>
-    </div>
-    <div class="note">Khung hình trên là đúng như video sẽ xuất ra.</div>
-
-    <div class="oldsub">
-      <label class="f">Phụ đề cũ có sẵn trong hình
-        <select id="cmode">
-          <option value="none">Không có / giữ nguyên</option>
-          <option value="blur">Làm mờ vùng phụ đề cũ</option>
-          <option value="dark">Che bằng dải đen</option>
-          <option value="crop">Cắt bỏ phần dưới chứa phụ đề cũ</option>
-        </select>
-      </label>
-      <div id="cctl" class="hidden">
-        <label class="f">Vị trí vùng che (kéo lên/xuống)
-          <input type="range" id="ctop" min="0" max="97" step="0.5" value="80">
-        </label>
-        <label class="f">Độ cao vùng che
-          <input type="range" id="ch" min="3" max="40" step="0.5" value="14">
-        </label>
-        <div class="row" style="margin-top:6px">
-          <button class="btn ghost" id="cauto">Tự dò vị trí phụ đề cũ</button>
-        </div>
-        <div class="note" id="cmsg"></div>
-      </div>
-    </div>
-
+    <video id="preview" controls playsinline></video>
     <div class="segs" id="segs"></div>
     <div class="grid">
       <label class="f">Cỡ chữ
@@ -231,14 +187,40 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 
 <!-- ================= WORKER: nhận dạng giọng nói + dịch ================= -->
 <script type="text/worker" id="workerSrc">
-import { pipeline, env, Tensor } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
-env.allowLocalModels = false;
+// Hai bộ chạy AI:
+//  - "v3": bản mới, nhanh, hỗ trợ WebGPU (máy tính, Android)
+//  - "v2": bản nhẹ, không dùng vùng nhớ chung → chạy được trên iPhone/iPad (Safari báo "Out of memory" với v3)
+const LIBS = {
+  v3: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3',
+  v2: 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2',
+};
+let T = null, libName = '';
+async function useLib(name) {
+  if (T && libName === name) return T;
+  T = await import(LIBS[name]);
+  libName = name;
+  T.env.allowLocalModels = false;
+  if (name === 'v2') {
+    T.env.backends.onnx.wasm.numThreads = 1;   // bản wasm 1 luồng, bộ nhớ thường (không shared)
+    T.env.backends.onnx.wasm.proxy = false;
+  }
+  asr = null; asrKey = ''; mt = null;
+  return T;
+}
+const isMemErr = (e) => /out of memory|no available backend|RangeError|memory access|Aborted/i.test(String(e?.message || e));
+// Bản nhẹ dùng các mô hình Xenova (có sẵn file nén 8-bit cho v2); mô hình "turbo" quá nặng cho điện thoại → dùng small
+const V2_MODEL = {
+  'onnx-community/whisper-tiny': 'Xenova/whisper-tiny',
+  'onnx-community/whisper-base': 'Xenova/whisper-base',
+  'onnx-community/whisper-small': 'Xenova/whisper-small',
+  'onnx-community/whisper-large-v3-turbo': 'Xenova/whisper-small',
+};
 
 const SR = 16000;
 const post = (type, data = {}) => self.postMessage({ type, ...data });
 const CODES = ['en','zh','de','es','ru','ko','fr','ja','pt','tr','pl','ca','nl','ar','sv','it','id','hi','fi','vi','he','uk','el','ms','cs','ro','da','hu','ta','no','th','ur','hr','bg','lt','la','mi','ml','cy','sk','te','fa','lv','bn','sr','az','sl','kn','et','mk','br','eu','is','hy','ne','mn','bs','kk','sq','sw','gl','mr','pa','si','km','sn','yo','so','af','oc','ka','be','tg','sd','gu','am','yi','lo','uz','fo','ht','ps','tk','nn','mt','sa','lb','my','bo','tl','mg','as','tt','haw','ln','ha','ba','jw','su','yue'];
 
-let asr = null, asrKey = '', mt = null;
+var asr = null, asrKey = '', mt = null;
 
 async function hasWebGPU() {
   try { if (!navigator.gpu) return false; return !!(await navigator.gpu.requestAdapter()); }
@@ -257,7 +239,9 @@ function dlProgress(label) {
   };
 }
 
-async function loadASR(modelId, wantGPU) {
+async function loadASR(modelId, wantGPU, lite) {
+  if (lite || libName === 'v2') return loadASRLite(modelId);
+  await useLib('v3');
   const key = modelId + '|' + wantGPU;
   if (asr && asrKey === key) return asr;
   if (asr) { try { await asr.dispose(); } catch {} asr = null; }
@@ -273,19 +257,36 @@ async function loadASR(modelId, wantGPU) {
   for (const t of tries) {
     try {
       post('status', { stage: 'Đang tải mô hình nhận dạng giọng nói…', indet: true });
-      asr = await pipeline('automatic-speech-recognition', modelId, { ...t, progress_callback: dlProgress('Tải mô hình nhận dạng') });
+      asr = await T.pipeline('automatic-speech-recognition', modelId, { ...t, progress_callback: dlProgress('Tải mô hình nhận dạng') });
       asrKey = key;
       post('device', { device: t.device });
       return asr;
     } catch (e) { err = e; console.warn('Load fail', t, e); }
   }
+  if (isMemErr(err)) {
+    post('note', { text: 'Thiết bị thiếu bộ nhớ cho bản thường — chuyển sang bản nhẹ…' });
+    return loadASRLite(modelId);
+  }
   throw err;
+}
+
+async function loadASRLite(modelId) {
+  await useLib('v2');
+  const id = V2_MODEL[modelId] || 'Xenova/whisper-base';
+  if (asr && asrKey === id) return asr;
+  if (asr) { try { await asr.dispose(); } catch {} asr = null; }
+  post('status', { stage: 'Đang tải mô hình nhận dạng giọng nói (bản nhẹ)…', indet: true });
+  asr = await T.pipeline('automatic-speech-recognition', id, { quantized: true, progress_callback: dlProgress('Tải mô hình nhận dạng') });
+  asrKey = id;
+  post('device', { device: 'wasm-lite' });
+  return asr;
 }
 
 async function loadMT() {
   if (mt) return mt;
   post('status', { stage: 'Đang tải mô hình dịch sang tiếng Việt…', indet: true });
-  mt = await pipeline('translation', 'Xenova/opus-mt-en-vi', { dtype: 'q8', device: 'wasm', progress_callback: dlProgress('Tải mô hình dịch') });
+  const opt = libName === 'v2' ? { quantized: true } : { dtype: 'q8', device: 'wasm' };
+  mt = await T.pipeline('translation', 'Xenova/opus-mt-en-vi', { ...opt, progress_callback: dlProgress('Tải mô hình dịch') });
   return mt;
 }
 
@@ -322,7 +323,7 @@ async function detectLanguage(pipe, audio) {
   const score = {};
   for (const st of wins) {
     const { input_features } = await processor(audio.subarray(st, st + 30 * SR));
-    const decoder_input_ids = new Tensor('int64', BigInt64Array.from([BigInt(sot)]), [1, 1]);
+    const decoder_input_ids = new T.Tensor('int64', BigInt64Array.from([BigInt(sot)]), [1, 1]);
     const out = await model({ input_features, decoder_input_ids });
     const data = out.logits.data, V = out.logits.dims.at(-1), base = data.length - V;
     let mx = -Infinity;
@@ -408,10 +409,10 @@ function tidy(segs, dur) {
 }
 
 self.onmessage = async (ev) => {
-  const { cmd, audio, model, useGPU, lang } = ev.data;
+  const { cmd, audio, model, useGPU, lang, lite } = ev.data;
   if (cmd !== 'run') return;
   try {
-    let pipe = await loadASR(model, useGPU);
+    let pipe = await loadASR(model, useGPU, lite);
 
     // 1) Nhận diện ngôn ngữ
     let L = lang, prob = 1;
@@ -432,7 +433,7 @@ self.onmessage = async (ev) => {
       task = 'translate'; // Whisper dịch thẳng sang tiếng Anh, sau đó dịch sang tiếng Việt
       if (model.includes('turbo')) {
         post('note', { text: 'Mô hình "rất chính xác" không hỗ trợ dịch ngôn ngữ này — dùng mô hình "Chính xác" thay thế.' });
-        pipe = await loadASR('onnx-community/whisper-small', useGPU);
+        pipe = await loadASR('onnx-community/whisper-small', useGPU, lite);
       }
     }
     const opts = { task };
@@ -448,6 +449,7 @@ self.onmessage = async (ev) => {
     // 3) Dịch sang tiếng Việt
     if (L === 'vi') segs.forEach(s => s.vi = s.src);
     else {
+      if (libName === 'v2' && asr) { try { await asr.dispose(); } catch {} asr = null; asrKey = ''; } // giải phóng bộ nhớ trên điện thoại
       const tr = await loadMT();
       post('status', { stage: 'Đang dịch sang tiếng Việt…', indet: false });
       const B = 6;
@@ -486,6 +488,7 @@ async function loadMB() {
 // ---------- Môi trường ----------
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
 const hasGPU = !!navigator.gpu;
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 $('model').value = (!isMobile && hasGPU) ? 'onnx-community/whisper-small' : 'onnx-community/whisper-base';
 $('envNote').textContent = hasGPU
   ? 'Thiết bị hỗ trợ tăng tốc đồ hoạ (WebGPU) — xử lý sẽ nhanh hơn.'
@@ -633,7 +636,7 @@ $('go').addEventListener('click', async () => {
         else if (m.type === 'error') reject(new Error(m.message));
       };
       w.onerror = (e) => reject(new Error(e.message || 'Lỗi khi chạy mô hình AI'));
-      w.postMessage({ cmd: 'run', audio, model: $('model').value, useGPU: hasGPU, lang: $('lang').value }, [audio.buffer]);
+      w.postMessage({ cmd: 'run', audio, model: $('model').value, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS }, [audio.buffer]);
     });
     state.segments = result.segments;
     state.lang = result.lang;
@@ -645,7 +648,7 @@ $('go').addEventListener('click', async () => {
     console.error(e);
     $('runErr').textContent = 'Lỗi: ' + (e.message || e) + '\nGợi ý: thử mức chính xác thấp hơn, hoặc dùng Chrome/Edge bản mới.';
     show('runErr');
-    if (/memory|Array buffer allocation|OOM/i.test(e.message || '')) { worker?.terminate(); worker = null; }
+    worker?.terminate(); worker = null;   // làm mới hoàn toàn để lần thử sau không bị kẹt bộ nhớ
   } finally {
     $('go').disabled = false;
     keepAwake(false);
@@ -653,123 +656,16 @@ $('go').addEventListener('click', async () => {
 });
 
 // ---------- Bước 3: xem trước & sửa ----------
-function getStyle() {
-  return {
-    size: parseFloat($('fsize').value),
-    kind: $('fstyle').value,
-    cover: { mode: $('cmode').value, top: parseFloat($('ctop').value) / 100, h: parseFloat($('ch').value) / 100 },
-  };
-}
-
-// Vẽ khung hình trước xem (giống hệt video xuất ra)
-const pv = $('pv'), pvx = pv.getContext('2d');
-function renderPreview() {
+function refreshTrack() {
   const v = $('preview');
-  if (!v.videoWidth) return;
-  const st = getStyle();
-  const k = Math.min(1, 960 / Math.max(v.videoWidth, v.videoHeight));
-  const { W, H } = outSize(v.videoWidth * k, v.videoHeight * k, st.cover);
-  if (pv.width !== W || pv.height !== H) { pv.width = W; pv.height = H; }
-  const i = cueIndex(state.segments, v.currentTime);
-  drawFrame(pvx, (c, x, y, w, h) => c.drawImage(v, x, y, w, h), W, H, i >= 0 ? state.segments[i].vi : '', st);
-  $('ptime').textContent = `${fmtShort(v.currentTime)} / ${fmtShort(v.duration || 0)}`;
-  if (!seeking && v.duration) $('pseek').value = Math.round(v.currentTime / v.duration * 1000);
-}
-let seeking = false, playing = false;
-function pvLoop() {
-  if (!playing) return;
-  renderPreview();
-  const v = $('preview');
-  if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(pvLoop); else requestAnimationFrame(pvLoop);
-}
-(() => {
-  const v = $('preview');
-  v.addEventListener('loadeddata', renderPreview);
-  v.addEventListener('seeked', renderPreview);
-  v.addEventListener('play', () => { playing = true; $('pplay').textContent = '❚❚'; pvLoop(); });
-  v.addEventListener('pause', () => { playing = false; $('pplay').textContent = '▶'; renderPreview(); });
-  v.addEventListener('ended', () => { playing = false; $('pplay').textContent = '▶'; });
-  $('pplay').onclick = () => { v.paused ? v.play().catch(() => {}) : v.pause(); };
-  $('pv').onclick = () => $('pplay').click();
-  $('pseek').addEventListener('input', (e) => { seeking = true; if (v.duration) v.currentTime = e.target.value / 1000 * v.duration; });
-  $('pseek').addEventListener('change', () => { seeking = false; });
-  ['fsize', 'fstyle', 'ctop', 'ch'].forEach(id => $(id).addEventListener('input', renderPreview));
-  $('cmode').addEventListener('change', async () => {
-    const on = $('cmode').value !== 'none';
-    show('cctl', on);
-    if (on && !state.oldSubChecked) await autoDetectOldSubs();
-    renderPreview();
-  });
-  $('cauto').onclick = autoDetectOldSubs;
-})();
-
-// Tự dò vùng có chữ sáng (phụ đề cũ) ở nửa dưới khung hình, tại các thời điểm có lời thoại
-async function autoDetectOldSubs() {
-  const v = $('preview');
-  if (!v.videoWidth) return;
-  state.oldSubChecked = true;
-  const btn = $('cauto'); btn.disabled = true;
-  $('cmsg').textContent = 'Đang dò vị trí phụ đề cũ…';
-  const wasPlaying = !v.paused; v.pause();
-  const keepT = v.currentTime;
-  const cw = 320, chh = Math.max(2, Math.round(cw * v.videoHeight / v.videoWidth));
-  const c = makeCanvas(cw, chh), x = c.getContext('2d', { willReadFrequently: true });
-  const segs = state.segments;
-  const N = Math.min(14, segs.length);
-  const times = [];
-  for (let i = 0; i < N; i++) { const s = segs[Math.floor((i + 0.5) * segs.length / N)]; times.push((s.start + s.end) / 2); }
-  if (!times.length) for (let i = 1; i <= 10; i++) times.push(v.duration * i / 11);
-  const score = new Float32Array(chh);
-  const seekTo = (t) => new Promise(r => { const to = setTimeout(r, 2500); v.addEventListener('seeked', () => { clearTimeout(to); r(); }, { once: true }); v.currentTime = t; });
-  let used = 0;
-  try {
-    for (const t of times) {
-      await seekTo(t);
-      x.drawImage(v, 0, 0, cw, chh);
-      const d = x.getImageData(0, 0, cw, chh).data;
-      for (let y = Math.floor(chh * 0.45); y < chh; y++) {
-        let cnt = 0, prev = 0;
-        for (let xx = 0; xx < cw; xx++) {
-          const p = (y * cw + xx) * 4;
-          const L = 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
-          if (xx && Math.abs(L - prev) > 60 && Math.max(L, prev) > 165) cnt++;
-          prev = L;
-        }
-        score[y] += cnt;
-      }
-      used++;
-    }
-  } catch (e) { console.warn(e); }
-  await seekTo(keepT);
-  if (wasPlaying) v.play().catch(() => {});
-  btn.disabled = false;
-  const band = findTextBand(score, chh, used, cw);
-  if (!band) {
-    $('cmsg').textContent = 'Không thấy phụ đề cũ rõ ràng. Hãy kéo 2 thanh trên cho vùng che trùng với phụ đề cũ.';
-    renderPreview(); return;
-  }
-  $('ctop').value = (band.top * 100).toFixed(1);
-  $('ch').value = (band.h * 100).toFixed(1);
-  $('cmsg').textContent = 'Đã tìm thấy vùng phụ đề cũ. Kiểm tra khung hình trên, nếu chưa khớp hãy kéo chỉnh thêm.';
-  renderPreview();
-}
-
-function findTextBand(score, Hc, frames, cw) {
-  if (!frames) return null;
-  const sm = new Float32Array(Hc);
-  for (let y = 1; y < Hc - 1; y++) sm[y] = (score[y - 1] + score[y] + score[y + 1]) / 3 / frames;
-  let best = -1, mx = 0;
-  for (let y = Math.floor(Hc * 0.45); y < Hc; y++) if (sm[y] > mx) { mx = sm[y]; best = y; }
-  if (best < 0 || mx < cw * 0.035) return null;   // quá ít nét chữ → không có phụ đề
-  const th = mx * 0.3, gap = Math.max(2, Math.round(Hc * 0.04));
-  let s = best, e = best, miss = 0;
-  for (let y = best - 1; y >= Math.floor(Hc * 0.4); y--) { if (sm[y] >= th) { s = y; miss = 0; } else if (++miss > gap) break; }
-  miss = 0;
-  for (let y = best + 1; y < Hc; y++) { if (sm[y] >= th) { e = y; miss = 0; } else if (++miss > gap) break; }
-  const pad = Math.round((e - s) * 0.25) + 2;
-  s = Math.max(0, s - pad); e = Math.min(Hc - 1, e + pad);
-  if ((e - s) / Hc > 0.35) return null;
-  return { top: s / Hc, h: Math.max(0.03, (e - s + 1) / Hc) };
+  v.querySelectorAll('track').forEach(t => t.remove());
+  if (state.vttUrl) URL.revokeObjectURL(state.vttUrl);
+  state.vttUrl = URL.createObjectURL(new Blob([toVTT(state.segments)], { type: 'text/vtt' }));
+  const tr = document.createElement('track');
+  tr.kind = 'subtitles'; tr.srclang = 'vi'; tr.label = 'Tiếng Việt'; tr.default = true; tr.src = state.vttUrl;
+  v.appendChild(tr);
+  tr.addEventListener('load', () => { tr.track.mode = 'showing'; });
+  setTimeout(() => { if (tr.track) tr.track.mode = 'showing'; }, 50);
 }
 
 function openEditor() {
@@ -780,18 +676,19 @@ function openEditor() {
   const v = $('preview');
   if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
   state.previewUrl = URL.createObjectURL(state.file);
-  state.oldSubChecked = false;
   v.src = state.previewUrl;
+  refreshTrack();
 
   const box = $('segs'); box.innerHTML = '';
   const showSrc = L !== 'vi';
-  state.segments.forEach((s) => {
-    const row = document.createElement('div'); row.className = 'seg';
+  let timer = null;
+  state.segments.forEach((s, i) => {
+    const row = document.createElement('div'); row.className = 'seg'; row.dataset.i = i;
     const b = document.createElement('button'); b.textContent = `${fmtShort(s.start)} → ${fmtShort(s.end)}`;
-    b.onclick = () => { v.currentTime = s.start + 0.01; v.play().catch(() => {}); };
+    b.onclick = () => { v.currentTime = s.start + 0.01; v.play().catch(()=>{}); };
     const col = document.createElement('div');
     const ta = document.createElement('textarea'); ta.rows = 1; ta.value = s.vi;
-    ta.oninput = () => { s.vi = ta.value; if (v.paused) renderPreview(); };
+    ta.oninput = () => { s.vi = ta.value; clearTimeout(timer); timer = setTimeout(refreshTrack, 600); };
     col.appendChild(ta);
     if (showSrc) { const o = document.createElement('div'); o.className = 'src'; o.textContent = s.src; col.appendChild(o); }
     row.append(b, col); box.appendChild(row);
@@ -837,18 +734,15 @@ function wrapLines(ctx, text, maxW) {
   return lines;
 }
 
-function drawSub(ctx, W, H, text, style, band) {
+function drawSub(ctx, W, H, text, style) {
   if (!text || !text.trim()) return;
   const fs = Math.round(Math.min(W, H) * style.size);
   ctx.save();
   ctx.font = `600 ${fs}px "Be Vietnam Pro", Arial, "Helvetica Neue", "Segoe UI", Roboto, sans-serif`;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   const lines = wrapLines(ctx, text.trim(), W * 0.88);
-  const lh = fs * 1.3;
-  let y0;
-  if (band) y0 = band.y + band.h / 2 - lh * (lines.length - 1) / 2;   // đặt phụ đề mới vào đúng chỗ phụ đề cũ
-  else { const bottom = H - Math.max(H * 0.06, fs * 0.8); y0 = bottom - lh * (lines.length - 1) - lh / 2; }
-  y0 = Math.min(y0, H - lh * (lines.length - 0.5) - 2);
+  const lh = fs * 1.3, bottom = H - Math.max(H * 0.06, fs * 0.8);
+  const y0 = bottom - lh * (lines.length - 1) - lh / 2;
   lines.forEach((ln, i) => {
     const y = y0 + i * lh;
     if (style.kind === 'box') {
@@ -874,50 +768,6 @@ function makeCanvas(w, h) {
 }
 const even = (x) => Math.max(2, Math.round(x / 2) * 2);
 
-// Kích thước khung xuất (khi "cắt bỏ" thì chỉ giữ phần phía trên vùng phụ đề cũ)
-function outSize(w, h, cover) {
-  if (cover.mode === 'crop') return { W: even(w), H: even(h * Math.max(0.3, cover.top)), fullH: h };
-  return { W: even(w), H: even(h), fullH: h };
-}
-
-let blurCanvas = null;
-function coverBand(ctx, W, band, mode) {
-  const { y, h } = band;
-  if (mode === 'dark') {
-    ctx.fillStyle = 'rgba(10,10,10,0.9)';
-    ctx.fillRect(0, y, W, h);
-    return;
-  }
-  // Làm mờ: thu nhỏ rồi phóng to lại (chạy được trên mọi trình duyệt), thêm lớp tối nhẹ
-  const sw = Math.max(8, Math.round(W / 28)), sh = Math.max(2, Math.round(h / 28));
-  if (!blurCanvas) blurCanvas = makeCanvas(sw, sh);
-  if (blurCanvas.width !== sw || blurCanvas.height !== sh) { blurCanvas.width = sw; blurCanvas.height = sh; }
-  const b = blurCanvas.getContext('2d');
-  b.imageSmoothingEnabled = true; b.imageSmoothingQuality = 'high';
-  b.drawImage(ctx.canvas, 0, y, W, h, 0, 0, sw, sh);
-  ctx.save();
-  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(blurCanvas, 0, 0, sw, sh, 0, y, W, h);
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(0, y, W, h);
-  ctx.restore();
-}
-
-// Vẽ 1 khung hình hoàn chỉnh: hình gốc → che/cắt phụ đề cũ → phụ đề tiếng Việt
-function drawFrame(ctx, drawSrc, W, H, text, style) {
-  const c = style.cover;
-  let band = null;
-  if (c.mode === 'crop') {
-    drawSrc(ctx, 0, 0, W, H / Math.max(0.3, c.top));   // phần dưới tràn ra ngoài khung → bị cắt
-  } else {
-    drawSrc(ctx, 0, 0, W, H);
-    if (c.mode === 'blur' || c.mode === 'dark') {
-      const y = Math.max(0, Math.round(c.top * H)), bh = Math.min(H - y, Math.round(c.h * H));
-      if (bh > 1) { band = { y, h: bh }; coverBand(ctx, W, band, c.mode); }
-    }
-  }
-  if (text) drawSub(ctx, W, H, text, style, band);
-}
 
 // ---------- Bước 4a: lồng phụ đề nhanh bằng WebCodecs (Mediabunny) ----------
 async function burnFast(file, segs, style, onProg) {
@@ -937,7 +787,7 @@ async function burnFast(file, segs, style, onProg) {
   let lastErr;
   for (const at of attempts) {
     const k = Math.min(1, at.maxSide / Math.max(W0, H0));
-    const { W, H } = outSize(W0 * k, H0 * k, style.cover);
+    const W = even(W0 * k), H = even(H0 * k);
     const input = new M.Input({ source: new M.BlobSource(file), formats: M.ALL_FORMATS });
     const output = new M.Output({ format: new M.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new M.BufferTarget() });
     let ctx = null;
@@ -946,11 +796,10 @@ async function burnFast(file, segs, style, onProg) {
       processedWidth: W, processedHeight: H,
       process: (sample) => {
         if (!ctx) ctx = makeCanvas(W, H).getContext('2d');
+        if (typeof sample.draw === 'function') sample.draw(ctx, 0, 0, W, H);
+        else ctx.drawImage(sample.toCanvasImageSource(), 0, 0, W, H);
         const i = cueIndex(segs, sample.timestamp);
-        drawFrame(ctx, (c, x, y, w, h) => {
-          if (typeof sample.draw === 'function') sample.draw(c, x, y, w, h);
-          else c.drawImage(sample.toCanvasImageSource(), x, y, w, h);
-        }, W, H, i >= 0 ? segs[i].vi : '', style);
+        if (i >= 0) drawSub(ctx, W, H, segs[i].vi, style);
         return ctx.canvas;
       },
     };
@@ -979,7 +828,7 @@ async function burnRealtime(file, segs, style, onProg, audioCtx) {
   v.src = URL.createObjectURL(file);
   await new Promise((res, rej) => { v.onloadedmetadata = res; v.onerror = () => rej(new Error('Không phát được video trên trình duyệt này.')); });
   const k = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
-  const { W, H } = outSize(v.videoWidth * k, v.videoHeight * k, style.cover);
+  const W = even(v.videoWidth * k), H = even(v.videoHeight * k);
   const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
   const stream = canvas.captureStream(30);
@@ -996,8 +845,9 @@ async function burnRealtime(file, segs, style, onProg, audioCtx) {
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   const stopped = new Promise(r => rec.onstop = r);
   const draw = () => {
+    ctx.drawImage(v, 0, 0, W, H);
     const i = cueIndex(segs, v.currentTime);
-    drawFrame(ctx, (c, x, y, w, h) => c.drawImage(v, x, y, w, h), W, H, i >= 0 ? segs[i].vi : '', style);
+    if (i >= 0) drawSub(ctx, W, H, segs[i].vi, style);
     onProg(v.currentTime / v.duration);
   };
   let running = true;
@@ -1019,7 +869,7 @@ $('burn').addEventListener('click', async () => {
   // Tạo AudioContext ngay khi bấm (yêu cầu của Safari/Chrome cho phương án dự phòng)
   let ac = null;
   try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
-  const style = getStyle();
+  const style = { size: parseFloat($('fsize').value), kind: $('fstyle').value };
   const segs = state.segments.map(s => ({ ...s })).sort((a, b) => a.start - b.start);
   $('burn').disabled = true;
   show('step4'); show('burnProg'); show('outBox', false); show('burnErr', false);
