@@ -77,6 +77,7 @@ video{width:100%;max-height:60vh;background:#000;border-radius:12px;display:bloc
 details.edit{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
 details.edit summary{cursor:pointer;font-weight:600;padding:6px 0;color:var(--accent)}
 details.edit video{margin-top:10px}
+.resume{margin-top:12px;padding:12px 14px;border-radius:12px;background:var(--accent-soft);font-size:14px}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 </style>
 </head>
@@ -97,6 +98,10 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     </label>
     <div class="info hidden" id="fileInfo"></div>
     <div class="err hidden" id="fileErr"></div>
+    <div class="resume hidden" id="resumeBox">
+      <div id="resumeMsg"></div>
+      <button class="btn ghost" id="resumeSkip" style="margin-top:10px;min-height:40px;padding:8px 14px">Bỏ qua, làm video khác</button>
+    </div>
 
     <div class="grid">
       <label class="f">Độ chính xác nhận dạng
@@ -145,7 +150,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     <div class="err hidden" id="burnErr"></div>
     <button class="btn block hidden" id="burnBtn">Bấm để lồng phụ đề vào video</button>
     <div id="outBox" class="hidden">
-      <video id="outVideo" controls playsinline></video>
+      <video id="outVideo" controls playsinline preload="metadata"></video>
       <div class="row">
         <a class="btn" id="dl" download>Tải video về máy</a>
         <button class="btn ghost hidden" id="share">Lưu vào Ảnh / Chia sẻ</button>
@@ -155,7 +160,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 
     <details class="edit" id="editBox">
       <summary>Sửa lời phụ đề (nếu dịch chưa đúng)</summary>
-      <video id="preview" controls playsinline></video>
+      <video id="preview" controls playsinline preload="metadata"></video>
       <div class="segs" id="segs"></div>
       <div class="row">
         <button class="btn" id="reburn">Lồng lại phụ đề đã sửa</button>
@@ -503,6 +508,37 @@ async function keepAwake(on) {
   } catch {}
 }
 
+// ---------- Lưu tạm phụ đề (để làm tiếp nếu điện thoại tự tải lại trang) ----------
+const JOB_KEY = 'phudeviet_job_v1';
+function loadJob() { try { return JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch { return null; } }
+function saveJob(patch) {
+  try {
+    const cur = loadJob() || {};
+    localStorage.setItem(JOB_KEY, JSON.stringify({ ...cur, ...patch, t: Date.now() }));
+  } catch {}
+}
+function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch {} }
+const sameFile = (job, f) => job && f && job.name === f.name && job.size === f.size;
+
+(function checkPendingJob() {
+  const job = loadJob();
+  if (!job || !job.segments?.length) return;
+  if (Date.now() - (job.t || 0) > 3 * 24 * 3600 * 1000) { clearJob(); return; }
+  if (job.stage === 'done') return;
+  if (job.stage === 'burning') {   // trang bị tải lại giữa lúc lồng phụ đề → lần sau giảm chất lượng
+    job.crashes = (job.crashes || 0) + 1;
+    saveJob({ stage: 'ready', crashes: job.crashes });
+  }
+  $('resumeMsg').innerHTML = (job.crashes
+      ? `Lần trước điện thoại <b>hết bộ nhớ</b> khi lồng phụ đề cho video <b>${esc(job.name)}</b>. `
+      : `Phụ đề cho video <b>${esc(job.name)}</b> đã được tạo trước đó. `)
+    + `Phụ đề vẫn được giữ lại — hãy <b>chọn lại đúng video này</b>, ứng dụng sẽ lồng tiếp`
+    + (job.crashes ? ' với chất lượng video thấp hơn cho nhẹ máy' : '') + ', không phải chạy AI lại.';
+  show('resumeBox');
+})();
+$('resumeSkip').onclick = () => { clearJob(); show('resumeBox', false); state.resume = false; $('go').textContent = 'Tạo phụ đề tiếng Việt'; };
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
 // ---------- Bước 1: chọn file ----------
 function probeDuration(file) {
   return new Promise((resolve) => {
@@ -534,6 +570,12 @@ async function onFile(file) {
     $('fileErr').textContent = `Video dài ${fmtDur(d)} — vượt quá giới hạn 20 phút. Hãy cắt ngắn rồi thử lại.`;
     show('fileErr'); return;
   }
+  const job = loadJob();
+  state.resume = !!(job && job.stage !== 'done' && sameFile(job, file) && job.segments?.length);
+  if (state.resume) {
+    state.segments = job.segments; state.lang = job.lang ?? null;
+    $('go').textContent = 'Lồng phụ đề đã có vào video';
+  } else $('go').textContent = 'Tạo phụ đề tiếng Việt';
   $('go').disabled = false;
 }
 $('file').addEventListener('change', (e) => onFile(e.target.files[0]));
@@ -628,6 +670,11 @@ $('go').addEventListener('click', async () => {
   keepAwake(true);
   const t0 = performance.now();
   let model = $('model').value;
+  if (state.resume) {
+    try { show('resumeBox', false); openEditor(); await doBurn(false); }
+    finally { $('go').disabled = false; keepAwake(false); }
+    return;
+  }
   try {
     let result = null;
     while (!result) {
@@ -654,6 +701,8 @@ $('go').addEventListener('click', async () => {
     $('sub').textContent = `${state.segments.length} câu phụ đề · mức "${MODEL_LABEL[model]}"`;
     setBar('bar', 1);
     worker?.terminate(); worker = null;   // giải phóng bộ nhớ AI trước khi lồng phụ đề (quan trọng trên điện thoại)
+    saveJob({ name: state.file.name, size: state.file.size, segments: state.segments, lang: state.lang, stage: 'ready', crashes: 0 });
+    await new Promise(r => setTimeout(r, 500));
     openEditor();
     await doBurn(false);
   } catch (e) {
@@ -689,10 +738,16 @@ function openEditor() {
     ? `<span class="pill">Ngôn ngữ gốc: ${LANG_NAMES[L] || L.toUpperCase()}</span>`
     : `<span class="pill">Ngôn ngữ gốc: không xác định — đã dịch qua tiếng Anh</span>`;
   const v = $('preview');
-  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
-  state.previewUrl = URL.createObjectURL(state.file);
-  v.src = state.previewUrl;
-  refreshTrack();
+  if (state.previewUrl) { URL.revokeObjectURL(state.previewUrl); state.previewUrl = null; }
+  v.removeAttribute('src'); v.load();
+  // Chỉ nạp video xem trước khi người dùng mở mục "Sửa lời" — tiết kiệm bộ nhớ trên điện thoại
+  $('editBox').ontoggle = () => {
+    if ($('editBox').open && !state.previewUrl) {
+      state.previewUrl = URL.createObjectURL(state.file);
+      v.src = state.previewUrl;
+      refreshTrack();
+    }
+  };
 
   const box = $('segs'); box.innerHTML = '';
   const showSrc = L !== 'vi';
@@ -703,7 +758,7 @@ function openEditor() {
     b.onclick = () => { v.currentTime = s.start + 0.01; v.play().catch(()=>{}); };
     const col = document.createElement('div');
     const ta = document.createElement('textarea'); ta.rows = 1; ta.value = s.vi;
-    ta.oninput = () => { s.vi = ta.value; clearTimeout(timer); timer = setTimeout(refreshTrack, 600); };
+    ta.oninput = () => { s.vi = ta.value; saveJob({ segments: state.segments }); clearTimeout(timer); timer = setTimeout(() => state.previewUrl && refreshTrack(), 600); };
     col.appendChild(ta);
     if (showSrc) { const o = document.createElement('div'); o.className = 'src'; o.textContent = s.src; col.appendChild(o); }
     row.append(b, col); box.appendChild(row);
@@ -779,8 +834,47 @@ function makeCanvas(w, h) {
 const even = (x) => Math.max(2, Math.round(x / 2) * 2);
 
 
+// ---------- Mức chất lượng video xuất ra ----------
+// Điện thoại: giảm độ phân giải + bitrate để không hết bộ nhớ; mỗi lần trang bị tải lại thì giảm thêm 1 mức
+const PROFILES = [
+  { maxSide: 1920, bitrate: null,    fps: null, label: 'gốc' },        // máy tính
+  { maxSide: 960,  bitrate: 1.6e6,   fps: 30,   label: '540p' },
+  { maxSide: 640,  bitrate: 0.9e6,   fps: 30,   label: '360p' },
+  { maxSide: 480,  bitrate: 0.55e6,  fps: 25,   label: '270p' },
+];
+function pickProfile() {
+  const crashes = loadJob()?.crashes || 0;
+  const base = isMobile ? 1 : 0;
+  return Math.min(PROFILES.length - 1, base + crashes);
+}
+
+// Ghi file ra từng mảnh Blob thay vì giữ cả video trong một vùng nhớ lớn
+function makeBlobSink() {
+  let parts = [];   // các đoạn không chồng nhau, xếp theo vị trí: { s, e, b }
+  const write = (pos, data) => {
+    const e = pos + data.byteLength, b = new Blob([data]);
+    const out = [];
+    for (const g of parts) {
+      if (g.e <= pos || g.s >= e) { out.push(g); continue; }
+      if (g.s < pos) out.push({ s: g.s, e: pos, b: g.b.slice(0, pos - g.s) });
+      if (g.e > e) out.push({ s: e, e: g.e, b: g.b.slice(e - g.s) });
+    }
+    out.push({ s: pos, e, b });
+    out.sort((x, y) => x.s - y.s);
+    parts = out;
+  };
+  const writable = new WritableStream({ write(chunk) { write(chunk.position, chunk.data); } });
+  const toBlob = (type) => {
+    const list = []; let p = 0;
+    for (const g of parts) { if (g.s > p) list.push(new Uint8Array(g.s - p)); list.push(g.b); p = Math.max(p, g.e); }
+    parts = [];
+    return new Blob(list, { type });
+  };
+  return { writable, toBlob };
+}
+
 // ---------- Bước 4a: lồng phụ đề nhanh bằng WebCodecs (Mediabunny) ----------
-async function burnFast(file, segs, onProg) {
+async function burnFast(file, segs, onProg, level) {
   if (typeof VideoEncoder === 'undefined') throw new Error('NO_WEBCODECS');
   const M = await loadMB();
   const probe = new M.Input({ source: new M.BlobSource(file), formats: M.ALL_FORMATS });
@@ -788,18 +882,22 @@ async function burnFast(file, segs, onProg) {
   if (!vt) throw new Error('Không tìm thấy hình ảnh trong video.');
   const hasAudio = !!(await probe.getPrimaryAudioTrack());
   const W0 = await vt.getDisplayWidth(), H0 = await vt.getDisplayHeight();
+  let srcFps = null;
+  try { srcFps = (await vt.computePacketStats(60))?.averagePacketRate || null; } catch {}
 
-  const attempts = [
-    { maxSide: 1920, codec: 'avc' },
-    { maxSide: 1280, codec: 'avc' },
-    { maxSide: 1280, codec: undefined },
-  ];
+  const attempts = [];
+  for (let l = level; l < PROFILES.length; l++) attempts.push({ ...PROFILES[l], codec: 'avc' });
+  attempts.push({ ...PROFILES[Math.min(level + 1, PROFILES.length - 1)], codec: undefined });
   let lastErr;
   for (const at of attempts) {
     const k = Math.min(1, at.maxSide / Math.max(W0, H0));
     const W = even(W0 * k), H = even(H0 * k);
     const input = new M.Input({ source: new M.BlobSource(file), formats: M.ALL_FORMATS });
-    const output = new M.Output({ format: new M.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new M.BufferTarget() });
+    const sink = makeBlobSink();
+    const output = new M.Output({
+      format: new M.Mp4OutputFormat({ fastStart: false }),
+      target: new M.StreamTarget(sink.writable, { chunked: true, chunkSize: 2 ** 21 }),
+    });
     let ctx = null;
     const video = {
       forceTranscode: true,
@@ -814,6 +912,8 @@ async function burnFast(file, segs, onProg) {
       },
     };
     if (at.codec) video.codec = at.codec;
+    if (at.bitrate) video.bitrate = at.bitrate;
+    if (at.fps && srcFps && srcFps > at.fps + 1) video.frameRate = at.fps;
     try {
       const conv = await M.Conversion.init({ input, output, video });
       const lostVideo = conv.discardedTracks.some(d => (d.track.type === 'video' || d.track.isVideoTrack?.()));
@@ -822,7 +922,8 @@ async function burnFast(file, segs, onProg) {
       if (lostAudio) throw new Error('NO_AUDIO_ENCODE');
       conv.onProgress = onProg;
       await conv.execute();
-      return new Blob([output.target.buffer], { type: 'video/mp4' });
+      ctx = null;
+      return { blob: sink.toBlob('video/mp4'), label: at.label, W, H };
     } catch (e) {
       if (e.message === 'NO_AUDIO_ENCODE') throw e;
       lastErr = e; console.warn('burn attempt failed', at, e);
@@ -832,12 +933,13 @@ async function burnFast(file, segs, onProg) {
 }
 
 // ---------- Bước 4b: dự phòng — phát & ghi lại theo thời gian thực ----------
-async function burnRealtime(file, segs, onProg, audioCtx) {
+async function burnRealtime(file, segs, onProg, audioCtx, level = 0) {
+  const prof = PROFILES[level];
   const v = document.createElement('video');
   v.playsInline = true; v.preload = 'auto';
   v.src = URL.createObjectURL(file);
   await new Promise((res, rej) => { v.onloadedmetadata = res; v.onerror = () => rej(new Error('Không phát được video trên trình duyệt này.')); });
-  const k = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight));
+  const k = Math.min(1, Math.min(1280, prof.maxSide) / Math.max(v.videoWidth, v.videoHeight));
   const W = even(v.videoWidth * k), H = even(v.videoHeight * k);
   const canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
@@ -850,7 +952,7 @@ async function burnRealtime(file, segs, onProg, audioCtx) {
   const types = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
   const mimeType = types.find(t => window.MediaRecorder?.isTypeSupported?.(t));
   if (!window.MediaRecorder) throw new Error('Trình duyệt không hỗ trợ ghi video. Hãy dùng Chrome, Edge hoặc Safari bản mới.');
-  const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000, audioBitsPerSecond: 160_000 });
+  const rec = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: prof.bitrate || 5_000_000, audioBitsPerSecond: isMobile ? 96_000 : 160_000 });
   const chunks = [];
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   const stopped = new Promise(r => rec.onstop = r);
@@ -883,6 +985,12 @@ async function doBurn(fromTap) {
   let ac = null;
   if (fromTap) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
   const segs = state.segments.map(s => ({ ...s })).sort((a, b) => a.start - b.start);
+  // Giải phóng video cũ trước khi làm mới
+  $('outVideo').removeAttribute('src'); $('outVideo').load();
+  if (state.outUrl) { URL.revokeObjectURL(state.outUrl); state.outUrl = null; }
+  state.outBlob = null;
+  const level = pickProfile();
+  saveJob({ stage: 'burning', segments: state.segments });
   show('step2'); show('runErr', false); show('burnErr', false); show('burnBtn', false); show('outBox', false);
   $('reburn').disabled = true;
   $('preview').pause();
@@ -893,14 +1001,18 @@ async function doBurn(fromTap) {
     const el = (performance.now() - t0) / 1000;
     $('sub').textContent = `${Math.round(p * 100)}%` + (p > 0.03 ? ` · còn khoảng ${fmtDur(el / p - el)}` : '');
   };
+  let finished = false;
   try {
-    let blob;
-    $('stage').textContent = 'Đang lồng phụ đề vào video…'; $('sub').textContent = ''; setBar('bar', 0);
+    let blob, qLabel = PROFILES[level].label;
+    $('stage').textContent = 'Đang lồng phụ đề vào video' + (level ? ` (chất lượng ${qLabel} cho nhẹ máy)…` : '…');
+    $('sub').textContent = ''; setBar('bar', 0);
     try {
-      blob = await burnFast(state.file, segs, prog);
+      const r = await burnFast(state.file, segs, prog, level);
+      blob = r.blob; qLabel = r.label;
     } catch (e) {
       console.warn('Fast burn failed → realtime', e);
       if (!fromTap) {
+        saveJob({ stage: 'ready' });
         // Trình duyệt chỉ cho phát video có tiếng khi người dùng bấm → hiện nút
         $('stage').textContent = 'Phụ đề đã tạo xong — bấm nút bên dưới để lồng vào video';
         $('sub').textContent = ''; setBar('bar', 0);
@@ -910,9 +1022,10 @@ async function doBurn(fromTap) {
       }
       $('stage').textContent = 'Đang lồng phụ đề (phát trực tiếp — mất bằng thời lượng video, giữ màn hình mở)…';
       setBar('bar', 0);
-      blob = await burnRealtime(state.file, segs, prog, ac);
+      blob = await burnRealtime(state.file, segs, prog, ac, level);
     }
-    if (state.outUrl) URL.revokeObjectURL(state.outUrl);
+    finished = true;
+    saveJob({ stage: 'done' });
     state.outBlob = blob;
     state.outUrl = URL.createObjectURL(blob);
     const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
@@ -920,14 +1033,18 @@ async function doBurn(fromTap) {
     $('dl').href = state.outUrl; $('dl').download = name;
     $('outVideo').src = state.outUrl;
     $('stage').textContent = 'Xong! Video đã có phụ đề tiếng Việt.';
-    $('sub').textContent = `Tổng thời gian ${fmtDur((performance.now() - t0) / 1000)} để lồng phụ đề`;
+    $('sub').textContent = `${fmtMB(blob.size)} · chất lượng ${qLabel} · lồng trong ${fmtDur((performance.now() - t0) / 1000)}`;
     setBar('bar', 1);
     show('step3'); show('outBox');
-    const f = new File([blob], name, { type: blob.type });
     show('share', false);
-    if (navigator.canShare?.({ files: [f] })) {
+    let canShareFiles = false;
+    try { canShareFiles = !!navigator.canShare?.({ files: [new File([new Blob(['x'])], 'x.mp4', { type: 'video/mp4' })] }); } catch {}
+    if (canShareFiles) {
       show('share');
-      $('share').onclick = () => navigator.share({ files: [f], title: name }).catch(() => {});
+      $('share').onclick = () => {
+        const f = new File([state.outBlob], name, { type: state.outBlob.type });
+        navigator.share({ files: [f], title: name }).catch(() => {});
+      };
     }
     $('saveHint').textContent = isIOS ? 'Trên iPhone: bấm "Lưu vào Ảnh / Chia sẻ" rồi chọn "Lưu video" để đưa vào ứng dụng Ảnh.' : '';
     $('step3').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -937,6 +1054,7 @@ async function doBurn(fromTap) {
     $('burnErr').textContent = 'Không lồng được phụ đề: ' + (e.message || e) + '\nBạn có thể bấm nút bên dưới để thử lại, hoặc tải file .srt trong mục "Sửa lời phụ đề".';
     show('burnErr'); show('burnBtn');
   } finally {
+    if (!finished && loadJob()?.stage === 'burning') saveJob({ stage: 'ready' });
     burning = false;
     $('reburn').disabled = false;
     keepAwake(false);
