@@ -802,7 +802,7 @@ function wrapLines(ctx, text, maxW) {
   return lines;
 }
 
-// Kiểu phụ đề cố định: chữ trắng đậm, viền đen, trên nền đen mờ — dễ đọc trên mọi cảnh
+// Kiểu phụ đề cố định: chữ vàng đậm, viền đen, trên nền đen mờ — dễ đọc trên mọi cảnh
 const SUB_SIZE = 0.056;
 function drawSub(ctx, W, H, text) {
   if (!text || !text.trim()) return;
@@ -821,7 +821,7 @@ function drawSub(ctx, W, H, text) {
     ctx.lineJoin = 'round'; ctx.miterLimit = 2;
     ctx.lineWidth = Math.max(2, fs * 0.12); ctx.strokeStyle = 'rgba(0,0,0,0.85)';
     ctx.strokeText(ln, W / 2, y);
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#ffe14d';   // chữ vàng
     ctx.fillText(ln, W / 2, y);
   });
   ctx.restore();
