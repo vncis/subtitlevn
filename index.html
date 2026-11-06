@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Phụ Đề Việt</title>
-<meta name="description" content="Tải video lên, tự nhận diện ngôn ngữ, tạo phụ đề tiếng Việt, lồng vào video và tải về. Chạy hoàn toàn trên trình duyệt.">
+<meta name="description" content="Tải video lên, tự nhận diện ngôn ngữ, tạo phụ đề tiếng Việt hoặc ngôn ngữ khác, lồng vào video và tải về. Chạy hoàn toàn trên trình duyệt.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -45,6 +45,7 @@ h1 span{color:var(--accent)}
 .info{margin-top:12px;font-size:14px;color:var(--muted)}
 .info b{color:var(--ink);font-weight:600}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.grid .full{grid-column:1/-1}
 @media (max-width:560px){.grid{grid-template-columns:1fr}}
 label.f{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--muted)}
 select,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
@@ -85,7 +86,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 <div class="wrap">
   <header>
     <h1>Phụ Đề <span>Việt</span></h1>
-    <div class="tag">Video → phụ đề tiếng Việt, chạy ngay trên trình duyệt của bạn</div>
+    <div class="tag">Video → phụ đề tiếng Việt và nhiều ngôn ngữ khác, chạy ngay trên trình duyệt</div>
   </header>
 
   <!-- 1. Chọn video -->
@@ -128,8 +129,28 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
           <option value="vi">Tiếng Việt</option>
         </select>
       </label>
+      <label class="f full">Ngôn ngữ phụ đề muốn in lên video
+        <select id="target">
+          <option value="vi">Tiếng Việt</option>
+          <option value="en">Tiếng Anh (English)</option>
+          <option value="orig">Giữ nguyên ngôn ngữ gốc của video</option>
+          <option value="zh">Tiếng Trung (中文)</option>
+          <option value="fr">Tiếng Pháp (Français)</option>
+          <option value="de">Tiếng Đức (Deutsch)</option>
+          <option value="es">Tiếng Tây Ban Nha (Español)</option>
+          <option value="ru">Tiếng Nga (Русский)</option>
+          <option value="it">Tiếng Ý (Italiano)</option>
+          <option value="id">Tiếng Indonesia</option>
+          <option value="ar">Tiếng Ả Rập (العربية)</option>
+          <option value="hi">Tiếng Hindi (हिन्दी)</option>
+          <option value="ja">Tiếng Nhật (日本語) – mô hình lớn</option>
+          <option value="ko">Tiếng Hàn (한국어) – mô hình lớn</option>
+          <option value="th">Tiếng Thái (ไทย) – mô hình lớn</option>
+        </select>
+      </label>
     </div>
-    <button class="btn block" id="go" disabled>Tạo phụ đề tiếng Việt</button>
+    <div class="note hidden" id="targetNote"></div>
+    <button class="btn block" id="go" disabled>Tạo phụ đề</button>
     <div class="note" id="envNote"></div>
   </section>
 
@@ -145,7 +166,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 
   <!-- 3. Kết quả -->
   <section class="card hidden" id="step3">
-    <h2><span class="num">3</span>Video có phụ đề tiếng Việt</h2>
+    <h2><span class="num">3</span>Video có phụ đề</h2>
     <div style="margin-bottom:10px" id="detected"></div>
     <div class="err hidden" id="burnErr"></div>
     <button class="btn block hidden" id="burnBtn">Bấm để lồng phụ đề vào video</button>
@@ -191,7 +212,7 @@ async function useLib(name) {
     T.env.backends.onnx.wasm.numThreads = 1;   // bản wasm 1 luồng, bộ nhớ thường (không shared)
     T.env.backends.onnx.wasm.proxy = false;
   }
-  asr = null; asrKey = ''; mt = null;
+  asr = null; asrKey = ''; mt = null; mtId = '';
   return T;
 }
 const isMemErr = (e) => /out of memory|no available backend|RangeError|memory access|Aborted/i.test(String(e?.message || e));
@@ -208,6 +229,7 @@ const post = (type, data = {}) => self.postMessage({ type, ...data });
 const CODES = ['en','zh','de','es','ru','ko','fr','ja','pt','tr','pl','ca','nl','ar','sv','it','id','hi','fi','vi','he','uk','el','ms','cs','ro','da','hu','ta','no','th','ur','hr','bg','lt','la','mi','ml','cy','sk','te','fa','lv','bn','sr','az','sl','kn','et','mk','br','eu','is','hy','ne','mn','bs','kk','sq','sw','gl','mr','pa','si','km','sn','yo','so','af','oc','ka','be','tg','sd','gu','am','yi','lo','uz','fo','ht','ps','tk','nn','mt','sa','lb','my','bo','tl','mg','as','tt','haw','ln','ha','ba','jw','su','yue'];
 
 var asr = null, asrKey = '', mt = null;
+const LANG_VI = { en:'tiếng Anh', zh:'tiếng Trung', ja:'tiếng Nhật', ko:'tiếng Hàn', fr:'tiếng Pháp', de:'tiếng Đức', es:'tiếng Tây Ban Nha', ru:'tiếng Nga', th:'tiếng Thái', id:'tiếng Indonesia', vi:'tiếng Việt', it:'tiếng Ý', ar:'tiếng Ả Rập', hi:'tiếng Hindi' };
 
 async function hasWebGPU() {
   try { if (!navigator.gpu) return false; return !!(await navigator.gpu.requestAdapter()); }
@@ -269,11 +291,32 @@ async function loadASRLite(modelId) {
   return asr;
 }
 
-async function loadMT() {
-  if (mt) return mt;
-  post('status', { stage: 'Đang tải mô hình dịch sang tiếng Việt…', indet: true });
+// Mô hình dịch từ tiếng Anh sang từng ngôn ngữ.
+// Các mô hình opus-mt nhỏ (~100 MB); tiếng Nhật/Hàn/Thái không có bản nhỏ tốt → dùng M2M100 (~630 MB)
+const MT_MODELS = {
+  vi: { id: 'Xenova/opus-mt-en-vi', name: 'tiếng Việt' },
+  zh: { id: 'Xenova/opus-mt-en-zh', name: 'tiếng Trung' },
+  fr: { id: 'Xenova/opus-mt-en-fr', name: 'tiếng Pháp' },
+  de: { id: 'Xenova/opus-mt-en-de', name: 'tiếng Đức' },
+  es: { id: 'Xenova/opus-mt-en-es', name: 'tiếng Tây Ban Nha' },
+  ru: { id: 'Xenova/opus-mt-en-ru', name: 'tiếng Nga' },
+  it: { id: 'Xenova/opus-mt-en-it', name: 'tiếng Ý' },
+  id: { id: 'Xenova/opus-mt-en-id', name: 'tiếng Indonesia' },
+  ar: { id: 'Xenova/opus-mt-en-ar', name: 'tiếng Ả Rập' },
+  hi: { id: 'Xenova/opus-mt-en-hi', name: 'tiếng Hindi' },
+  ja: { id: 'Xenova/m2m100_418M', m2m: 'ja', name: 'tiếng Nhật' },
+  ko: { id: 'Xenova/m2m100_418M', m2m: 'ko', name: 'tiếng Hàn' },
+  th: { id: 'Xenova/m2m100_418M', m2m: 'th', name: 'tiếng Thái' },
+};
+let mtId = '';
+async function loadMT(target) {
+  const cfg = MT_MODELS[target];
+  if (mt && mtId === cfg.id) return mt;
+  if (mt) { try { await mt.dispose(); } catch {} mt = null; }
+  post('status', { stage: `Đang tải mô hình dịch sang ${cfg.name}…`, indet: true });
   const opt = libName === 'v2' ? { quantized: true } : { dtype: 'q8', device: 'wasm' };
-  mt = await T.pipeline('translation', 'Xenova/opus-mt-en-vi', { ...opt, progress_callback: dlProgress('Tải mô hình dịch') });
+  mt = await T.pipeline('translation', cfg.id, { ...opt, progress_callback: dlProgress('Tải mô hình dịch') });
+  mtId = cfg.id;
   return mt;
 }
 
@@ -396,7 +439,7 @@ function tidy(segs, dur) {
 }
 
 self.onmessage = async (ev) => {
-  const { cmd, audio, model, useGPU, lang, lite } = ev.data;
+  const { cmd, audio, model, useGPU, lang, lite, target } = ev.data;
   if (cmd !== 'run') return;
   try {
     let pipe = await loadASR(model, useGPU, lite);
@@ -415,11 +458,14 @@ self.onmessage = async (ev) => {
     }
 
     // 2) Nhận dạng giọng nói
+    //  - Phụ đề cùng ngôn ngữ với video ("giữ nguyên" hoặc trùng ngôn ngữ): chỉ chép lời
+    //  - Còn lại: Whisper đưa về tiếng Anh (chép lời nếu video tiếng Anh, dịch nếu ngôn ngữ khác), rồi dịch sang ngôn ngữ đích
+    const sameLang = target === 'orig' || (L && target === L);
     let task = 'transcribe';
-    if (L !== 'vi' && L !== 'en') {
-      task = 'translate'; // Whisper dịch thẳng sang tiếng Anh, sau đó dịch sang tiếng Việt
+    if (!sameLang && L !== 'en') {
+      task = 'translate';
       if (model.includes('turbo')) {
-        post('note', { text: 'Mô hình "rất chính xác" không hỗ trợ dịch ngôn ngữ này — dùng mô hình "Chính xác" thay thế.' });
+        post('note', { text: 'Mô hình "rất chính xác" không hỗ trợ dịch — dùng mô hình "Chính xác" thay thế.' });
         pipe = await loadASR('onnx-community/whisper-small', useGPU, lite);
       }
     }
@@ -433,22 +479,25 @@ self.onmessage = async (ev) => {
     });
     if (!segs.length) throw new Error('Không nghe thấy lời thoại nào trong video.');
 
-    // 3) Dịch sang tiếng Việt
-    if (L === 'vi') segs.forEach(s => s.vi = s.src);
+    // 3) Dịch sang ngôn ngữ phụ đề đã chọn (thuộc tính .vi = nội dung phụ đề in lên video)
+    if (sameLang || target === 'en') segs.forEach(s => s.vi = s.src);
     else {
+      const cfg = MT_MODELS[target];
+      if (!cfg) throw new Error('Chưa hỗ trợ ngôn ngữ phụ đề này.');
       if (libName === 'v2' && asr) { try { await asr.dispose(); } catch {} asr = null; asrKey = ''; } // giải phóng bộ nhớ trên điện thoại
-      const tr = await loadMT();
-      post('status', { stage: 'Đang dịch sang tiếng Việt…', indet: false });
-      const B = 6;
+      const tr = await loadMT(target);
+      post('status', { stage: `Đang dịch sang ${cfg.name}…`, indet: false });
+      const B = cfg.m2m ? 4 : 6;
       for (let i = 0; i < segs.length; i += B) {
         const batch = segs.slice(i, i + B);
-        const res = await tr(batch.map(s => s.src));
+        const texts = batch.map(s => s.src);
+        const res = cfg.m2m ? await tr(texts, { src_lang: 'en', tgt_lang: cfg.m2m }) : await tr(texts);
         const arr = Array.isArray(res) ? res : [res];
         batch.forEach((s, k) => { s.vi = (arr[k]?.translation_text || s.src).trim(); });
         post('progress', { value: Math.min(1, (i + B) / segs.length) });
       }
     }
-    post('result', { segments: segs, lang: L });
+    post('result', { segments: segs, lang: L, target: sameLang ? (L || 'orig') : target });
   } catch (e) {
     console.error(e);
     post('error', { message: e?.message || String(e) });
@@ -463,6 +512,9 @@ const MAX_SEC = 20 * 60;
 const SR = 16000;
 const LANG_NAMES = { en:'Tiếng Anh', zh:'Tiếng Trung', ja:'Tiếng Nhật', ko:'Tiếng Hàn', fr:'Tiếng Pháp', de:'Tiếng Đức', es:'Tiếng Tây Ban Nha', ru:'Tiếng Nga', th:'Tiếng Thái', id:'Tiếng Indonesia', vi:'Tiếng Việt', pt:'Tiếng Bồ Đào Nha', it:'Tiếng Ý', ar:'Tiếng Ả Rập', hi:'Tiếng Hindi', ms:'Tiếng Mã Lai', km:'Tiếng Khmer', lo:'Tiếng Lào', tl:'Tiếng Tagalog', nl:'Tiếng Hà Lan', tr:'Tiếng Thổ Nhĩ Kỳ', pl:'Tiếng Ba Lan', uk:'Tiếng Ukraina', yue:'Tiếng Quảng Đông' };
 
+const TARGET_KEY = 'phudeviet_target';
+const TARGET_NAMES = { vi:'tiếng Việt', en:'tiếng Anh', orig:'ngôn ngữ gốc', zh:'tiếng Trung', fr:'tiếng Pháp', de:'tiếng Đức', es:'tiếng Tây Ban Nha', ru:'tiếng Nga', it:'tiếng Ý', id:'tiếng Indonesia', ar:'tiếng Ả Rập', hi:'tiếng Hindi', ja:'tiếng Nhật', ko:'tiếng Hàn', th:'tiếng Thái' };
+const BIG_MT = ['ja', 'ko', 'th'];
 const state = { file: null, duration: 0, segments: [], lang: null, outUrl: null, outBlob: null, previewUrl: null, vttUrl: null };
 
 // ---------- Mediabunny (đọc/ghi video bằng WebCodecs) ----------
@@ -496,6 +548,8 @@ function fmtDur(sec) { if (sec == null || !isFinite(sec)) return ''; sec = Math.
 function fmtMB(b) { return (b / 1048576).toFixed(b > 1e8 ? 0 : 1) + ' MB'; }
 function toSRT(segs) { return segs.map((s, i) => `${i+1}\n${fmtTime(s.start)} --> ${fmtTime(s.end)}\n${(s.vi||'').trim()}\n`).join('\n'); }
 function toVTT(segs) { return 'WEBVTT\n\n' + segs.map(s => `${fmtTime(s.start,'.')} --> ${fmtTime(s.end,'.')}\n${(s.vi||'').trim()}\n`).join('\n'); }
+function subCode() { const s = state.subLang || $('target').value; return /^[a-z]{2,3}$/.test(s) ? s : 'sub'; }
+function subName() { const s = state.subLang || $('target').value; return TARGET_NAMES[s] || LANG_NAMES[s]?.toLowerCase() || ''; }
 function baseName() { return (state.file?.name || 'video').replace(/\.[^.]+$/, ''); }
 function show(id, on = true) { $(id).classList.toggle('hidden', !on); }
 function setBar(id, v, indet = false) { const b = $(id); b.classList.toggle('indet', indet); b.firstElementChild.style.width = (Math.max(0, Math.min(1, v)) * 100).toFixed(1) + '%'; }
@@ -531,13 +585,36 @@ const sameFile = (job, f) => job && f && job.name === f.name && job.size === f.s
   }
   $('resumeMsg').innerHTML = (job.crashes
       ? `Lần trước điện thoại <b>hết bộ nhớ</b> khi lồng phụ đề cho video <b>${esc(job.name)}</b>. `
-      : `Phụ đề cho video <b>${esc(job.name)}</b> đã được tạo trước đó. `)
+      : `Phụ đề ${TARGET_NAMES[job.target || 'vi'] || ''} cho video <b>${esc(job.name)}</b> đã được tạo trước đó. `)
     + `Phụ đề vẫn được giữ lại — hãy <b>chọn lại đúng video này</b>, ứng dụng sẽ lồng tiếp`
     + (job.crashes ? ' với chất lượng video thấp hơn cho nhẹ máy' : '') + ', không phải chạy AI lại.';
   show('resumeBox');
+  if (job.target && TARGET_NAMES[job.target]) $('target').value = job.target;
 })();
-$('resumeSkip').onclick = () => { clearJob(); show('resumeBox', false); state.resume = false; $('go').textContent = 'Tạo phụ đề tiếng Việt'; };
+$('resumeSkip').onclick = () => { clearJob(); show('resumeBox', false); state.resume = false; $('go').textContent = goLabel(); };
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------- Ngôn ngữ phụ đề ----------
+try { const t = localStorage.getItem(TARGET_KEY); if (t && TARGET_NAMES[t]) $('target').value = t; } catch {}
+function goLabel() { return state.resume ? `Lồng phụ đề ${TARGET_NAMES[$('target').value]} đã có vào video` : `Tạo phụ đề ${TARGET_NAMES[$('target').value]}`; }
+function updateTargetNote() {
+  const t = $('target').value, n = $('targetNote');
+  if (BIG_MT.includes(t)) {
+    n.textContent = isMobile
+      ? `Dịch sang ${TARGET_NAMES[t]} cần tải mô hình lớn (~630 MB) và rất tốn bộ nhớ — điện thoại có thể không chạy được. Nên dùng máy tính cho ngôn ngữ này.`
+      : `Dịch sang ${TARGET_NAMES[t]} cần tải thêm mô hình lớn (~630 MB) ở lần đầu.`;
+    show('targetNote');
+  } else if (t === 'orig') {
+    n.textContent = 'Phụ đề sẽ là lời thoại chép lại đúng ngôn ngữ đang nói trong video (không dịch).';
+    show('targetNote');
+  } else show('targetNote', false);
+  $('go').textContent = goLabel();
+}
+$('target').addEventListener('change', () => {
+  try { localStorage.setItem(TARGET_KEY, $('target').value); } catch {}
+  checkResume();
+  updateTargetNote();
+});
 
 // ---------- Bước 1: chọn file ----------
 function probeDuration(file) {
@@ -570,15 +647,18 @@ async function onFile(file) {
     $('fileErr').textContent = `Video dài ${fmtDur(d)} — vượt quá giới hạn 20 phút. Hãy cắt ngắn rồi thử lại.`;
     show('fileErr'); return;
   }
-  const job = loadJob();
-  state.resume = !!(job && job.stage !== 'done' && sameFile(job, file) && job.segments?.length);
-  if (state.resume) {
-    state.segments = job.segments; state.lang = job.lang ?? null;
-    $('go').textContent = 'Lồng phụ đề đã có vào video';
-  } else $('go').textContent = 'Tạo phụ đề tiếng Việt';
+  checkResume();
+  $('go').textContent = goLabel();
   $('go').disabled = false;
 }
+// Có phụ đề đã lưu cho đúng video + đúng ngôn ngữ → dùng lại, không chạy AI
+function checkResume() {
+  const job = loadJob(), file = state.file;
+  state.resume = !!(file && job && job.stage !== 'done' && sameFile(job, file) && job.segments?.length && (job.target || 'vi') === $('target').value);
+  if (state.resume) { state.segments = job.segments; state.lang = job.lang ?? null; state.subLang = job.subLang || 'vi'; }
+}
 $('file').addEventListener('change', (e) => onFile(e.target.files[0]));
+updateTargetNote();
 const drop = $('drop');
 ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
 ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
@@ -658,7 +738,7 @@ function runAI(audio, model) {
     };
     // Lỗi không bắt được trong worker (thường là tràn bộ nhớ làm worker chết)
     w.onerror = (e) => reject(new Error(e.message || 'Out of memory'));
-    w.postMessage({ cmd: 'run', audio, model, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS }, [audio.buffer]);
+    w.postMessage({ cmd: 'run', audio, model, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS, target: $('target').value }, [audio.buffer]);
   });
 }
 
@@ -697,11 +777,12 @@ $('go').addEventListener('click', async () => {
     }
     state.segments = result.segments;
     state.lang = result.lang;
+    state.subLang = result.target;
     $('stage').textContent = `Hoàn tất sau ${fmtDur((performance.now() - t0) / 1000)}`;
     $('sub').textContent = `${state.segments.length} câu phụ đề · mức "${MODEL_LABEL[model]}"`;
     setBar('bar', 1);
     worker?.terminate(); worker = null;   // giải phóng bộ nhớ AI trước khi lồng phụ đề (quan trọng trên điện thoại)
-    saveJob({ name: state.file.name, size: state.file.size, segments: state.segments, lang: state.lang, stage: 'ready', crashes: 0 });
+    saveJob({ name: state.file.name, size: state.file.size, segments: state.segments, lang: state.lang, target: $('target').value, subLang: state.subLang, stage: 'ready', crashes: 0 });
     await new Promise(r => setTimeout(r, 500));
     openEditor();
     await doBurn(false);
@@ -726,7 +807,7 @@ function refreshTrack() {
   if (state.vttUrl) URL.revokeObjectURL(state.vttUrl);
   state.vttUrl = URL.createObjectURL(new Blob([toVTT(state.segments)], { type: 'text/vtt' }));
   const tr = document.createElement('track');
-  tr.kind = 'subtitles'; tr.srclang = 'vi'; tr.label = 'Tiếng Việt'; tr.default = true; tr.src = state.vttUrl;
+  tr.kind = 'subtitles'; tr.srclang = subCode(); tr.label = 'Phụ đề'; tr.default = true; tr.src = state.vttUrl;
   v.appendChild(tr);
   tr.addEventListener('load', () => { tr.track.mode = 'showing'; });
   setTimeout(() => { if (tr.track) tr.track.mode = 'showing'; }, 50);
@@ -775,7 +856,7 @@ function openEditor() {
 
 $('srt').addEventListener('click', () => {
   const blob = new Blob(['﻿' + toSRT(state.segments)], { type: 'application/x-subrip;charset=utf-8' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = baseName() + '.vi.srt';
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = baseName() + '.' + subCode() + '.srt';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 });
@@ -790,12 +871,17 @@ function cueIndex(segs, t) {
 function wrapLines(ctx, text, maxW) {
   const lines = [];
   for (const para of text.split(/\n+/)) {
-    const words = para.split(/\s+/).filter(Boolean);
+    // Tách theo dấu cách; cụm quá dài không có dấu cách (tiếng Trung/Nhật/Thái) thì tách theo từng ký tự
+    const toks = [];
+    for (const w of para.split(/\s+/).filter(Boolean)) {
+      if (ctx.measureText(w).width <= maxW) toks.push({ t: w, sp: true });
+      else Array.from(w).forEach((ch, i) => toks.push({ t: ch, sp: i === 0 }));
+    }
     let cur = '';
-    for (const w of words) {
-      const t = cur ? cur + ' ' + w : w;
-      if (!cur || ctx.measureText(t).width <= maxW) cur = t;
-      else { lines.push(cur); cur = w; }
+    for (const { t, sp } of toks) {
+      const cand = cur ? cur + (sp ? ' ' : '') + t : t;
+      if (!cur || ctx.measureText(cand).width <= maxW) cur = cand;
+      else { lines.push(cur); cur = t; }
     }
     if (cur) lines.push(cur);
   }
@@ -808,7 +894,8 @@ function drawSub(ctx, W, H, text) {
   if (!text || !text.trim()) return;
   const fs = Math.round(Math.min(W, H) * SUB_SIZE);
   ctx.save();
-  ctx.font = `600 ${fs}px "Be Vietnam Pro", Arial, "Helvetica Neue", "Segoe UI", Roboto, sans-serif`;
+  ctx.font = `600 ${fs}px "Be Vietnam Pro", Arial, "Helvetica Neue", "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans", "Apple SD Gothic Neo", "Microsoft YaHei", "Yu Gothic", "Malgun Gothic", "Noto Sans CJK SC", "Noto Sans Thai", Thonburi, "Leelawadee UI", "Noto Sans Arabic", "Noto Sans Devanagari", sans-serif`;
+  if (/[\u0590-\u08FF]/.test(text)) ctx.direction = 'rtl';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   const lines = wrapLines(ctx, text.trim(), W * 0.88);
   const lh = fs * 1.3, bottom = H - Math.max(H * 0.06, fs * 0.8);
@@ -1029,10 +1116,10 @@ async function doBurn(fromTap) {
     state.outBlob = blob;
     state.outUrl = URL.createObjectURL(blob);
     const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
-    const name = `${baseName()}_phude-vi.${ext}`;
+    const name = `${baseName()}_phude-${subCode()}.${ext}`;
     $('dl').href = state.outUrl; $('dl').download = name;
     $('outVideo').src = state.outUrl;
-    $('stage').textContent = 'Xong! Video đã có phụ đề tiếng Việt.';
+    $('stage').textContent = `Xong! Video đã có phụ đề ${subName()}.`;
     $('sub').textContent = `${fmtMB(blob.size)} · chất lượng ${qLabel} · lồng trong ${fmtDur((performance.now() - t0) / 1000)}`;
     setBar('bar', 1);
     show('step3'); show('outBox');
