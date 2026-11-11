@@ -115,7 +115,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
       </label>
       <label class="f">Ngôn ngữ trong video
         <select id="lang">
-          <option value="auto">Tự động nhận diện</option>
+          <option value="auto">Tự động – nhận diện từng đoạn (video nhiều thứ tiếng)</option>
           <option value="en">Tiếng Anh</option>
           <option value="zh">Tiếng Trung</option>
           <option value="ja">Tiếng Nhật</option>
@@ -279,6 +279,23 @@ async function loadASR(modelId, wantGPU, lite) {
   throw err;
 }
 
+// Mô hình phụ để dịch lời nói sang tiếng Anh khi mô hình chính là "turbo" (turbo không hỗ trợ dịch)
+var asrTr = null;
+async function loadTranslateASR(wantGPU) {
+  if (asrTr) return asrTr;
+  const gpu = wantGPU && await hasWebGPU();
+  const tries = gpu ? [{ device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } }, { device: 'wasm', dtype: 'q8' }] : [{ device: 'wasm', dtype: 'q8' }];
+  let err;
+  for (const t of tries) {
+    try {
+      post('status', { stage: 'Đang tải thêm mô hình dịch lời nói…', indet: true });
+      asrTr = await T.pipeline('automatic-speech-recognition', 'onnx-community/whisper-small', { ...t, progress_callback: dlProgress('Tải mô hình dịch lời nói') });
+      return asrTr;
+    } catch (e) { err = e; }
+  }
+  throw err;
+}
+
 async function loadASRLite(modelId) {
   await useLib('v2');
   const id = V2_MODEL[modelId] || 'Xenova/whisper-base';
@@ -340,6 +357,24 @@ function pickWindows(audio, n) {
   for (let s = 0; s < audio.length; s += W) wins.push({ s, e: rms(audio, s, s + W) });
   wins.sort((a, b) => b.e - a.e);
   return wins.filter(w => w.e > 0.003).slice(0, n).map(w => w.s);
+}
+
+// Xác suất từng ngôn ngữ của MỘT đoạn âm thanh (≤30 giây) → [[mã, xác suất], …] giảm dần
+async function langProbs(pipe, slice) {
+  const { processor, model, tokenizer } = pipe;
+  const sot = tokId(tokenizer, '<|startoftranscript|>');
+  const ids = [];
+  for (const c of CODES) { const id = tokId(tokenizer, `<|${c}|>`); if (id != null) ids.push([c, id]); }
+  if (sot == null || ids.length < 20) throw new Error('Không đọc được token ngôn ngữ');
+  const { input_features } = await processor(slice);
+  const decoder_input_ids = new T.Tensor('int64', BigInt64Array.from([BigInt(sot)]), [1, 1]);
+  const out = await model({ input_features, decoder_input_ids });
+  const data = out.logits.data, V = out.logits.dims.at(-1), base = data.length - V;
+  let mx = -Infinity;
+  for (const [, id] of ids) mx = Math.max(mx, Number(data[base + id]));
+  let sum = 0;
+  const ps = ids.map(([c, id]) => { const e = Math.exp(Number(data[base + id]) - mx); sum += e; return [c, e]; });
+  return ps.map(([c, e]) => [c, e / sum]).sort((a, b) => b[1] - a[1]);
 }
 
 async function detectLanguage(pipe, audio) {
@@ -442,7 +477,7 @@ function splitLongCues(segs) {
     let t = s.start;
     chunks.forEach((c, i) => {
       const d = (s.end - s.start) * c.length / total;
-      out.push({ start: t, end: i === chunks.length - 1 ? s.end : t + d, src: i === 0 ? s.src : '', vi: c });
+      out.push({ start: t, end: i === chunks.length - 1 ? s.end : t + d, src: i === 0 ? s.src : '', vi: c, lang: s.lang });
       t += d;
     });
   }
@@ -450,7 +485,7 @@ function splitLongCues(segs) {
 }
 
 
-async function transcribe(pipe, audio, opts, onProg) {
+async function transcribe(pipe, audio, planFor, onProg) {
   const W = 30 * SR, total = audio.length, segs = [];
   let off = 0;
   while (off < total - SR * 0.5) {
@@ -459,7 +494,8 @@ async function transcribe(pipe, audio, opts, onProg) {
     const winSec = (end - off) / SR;
     const isLast = end >= total;
     if (rms(slice) < 0.002) { off = end; onProg(off / total); continue; }
-    const r = await pipe(slice, { ...opts, return_timestamps: true });
+    const plan = await planFor(slice);
+    const r = await plan.pipe(slice, { ...plan.opts, return_timestamps: true });
     let chunks = (r.chunks || []).filter(c => c && c.timestamp);
     if (!chunks.length && (r.text || '').trim()) chunks = [{ text: r.text, timestamp: [0, winSec] }];
     let next = end;
@@ -480,7 +516,7 @@ async function transcribe(pipe, audio, opts, onProg) {
       if (!text || JUNK.test(text) || !/[\p{L}\p{N}]/u.test(text)) continue;
       const S = off / SR + s, E = off / SR + e;
       if (rms(audio, S * SR, E * SR) < 0.0015) continue; // khoảng lặng → bỏ "ảo giác"
-      segs.push({ start: S, end: E, src: text });
+      segs.push({ start: S, end: E, src: text, lang: plan.lang, done: plan.done });
     }
     if (next <= off + SR) next = end;
     off = next;
@@ -516,46 +552,65 @@ self.onmessage = async (ev) => {
   try {
     let pipe = await loadASR(model, useGPU, lite);
 
-    // 1) Nhận diện ngôn ngữ
-    let L = lang, prob = 1;
-    if (L === 'auto') {
-      post('status', { stage: 'Đang nhận diện ngôn ngữ…', indet: true });
-      try { ({ lang: L, prob } = await detectLanguage(pipe, audio)); }
-      catch (e) {
-        console.warn('detect fallback', e);
-        if (/không có tiếng nói/.test(e.message)) throw e;
-        ({ lang: L, prob } = await guessLanguageFromText(pipe, audio));
+    // 1) Kế hoạch cho TỪNG đoạn ~30 giây:
+    //    nhận diện ngôn ngữ của đoạn đó → chép lời (nếu đã đúng ngôn ngữ phụ đề / tiếng Anh)
+    //    hoặc dịch lời nói sang tiếng Anh (Whisper) rồi dịch tiếp sang ngôn ngữ phụ đề.
+    //    Nhờ vậy video có nhiều thứ tiếng (Anh, Nga, Ukraina, Trung…) đều được dịch hết.
+    const auto = lang === 'auto';
+    const isTurbo = model.includes('turbo');
+    const seen = {};           // ngôn ngữ đã gặp → số giây
+    let prevLang = null, detectOK = true;
+    const planFor = async (slice) => {
+      let WL = auto ? null : lang, mixed = false;
+      if (auto && detectOK) {
+        try {
+          const ps = await langProbs(pipe, slice);
+          WL = ps[0][1] >= 0.35 || !prevLang ? ps[0][0] : prevLang;
+          mixed = ps[1] && ps[1][1] >= 0.25;           // đoạn có 2 thứ tiếng xen kẽ
+          if (mixed) console.log('Đoạn nhiều ngôn ngữ:', ps.slice(0, 3));
+        } catch (e) { console.warn('Không nhận diện được từng đoạn → để Whisper tự xử lý', e); detectOK = false; }
       }
-      post('detected', { lang: L, prob });
+      if (WL) { prevLang = WL; seen[WL] = (seen[WL] || 0) + slice.length / SR; }
+
+      // Phụ đề giữ nguyên ngôn ngữ gốc / trùng ngôn ngữ đoạn này → chỉ chép lời
+      if (target === 'orig' || (WL && WL === target && !mixed)) {
+        const opts = { task: 'transcribe' };
+        if (WL && !mixed) opts.language = WL;
+        return { pipe, opts, lang: WL, done: true };
+      }
+      // Đoạn tiếng Anh thuần → chép lời tiếng Anh
+      if (WL === 'en' && !mixed) return { pipe, opts: { task: 'transcribe', language: 'en' }, lang: 'en', done: target === 'en' };
+      // Ngôn ngữ khác / lẫn nhiều thứ tiếng → Whisper dịch lời nói sang tiếng Anh
+      const opts = { task: 'translate' };
+      if (WL && !mixed) opts.language = WL;
+      const p = isTurbo && !lite ? await loadTranslateASR(useGPU) : pipe;
+      return { pipe: p, opts, lang: WL, done: target === 'en' };
+    };
+
+    if (auto) {
+      post('status', { stage: 'Đang nhận diện ngôn ngữ…', indet: true });
+      if (!pickWindows(audio, 1).length) throw new Error('Video gần như không có tiếng nói');
     }
 
-    // 2) Nhận dạng giọng nói
-    //  - Phụ đề cùng ngôn ngữ với video ("giữ nguyên" hoặc trùng ngôn ngữ): chỉ chép lời
-    //  - Còn lại: Whisper đưa về tiếng Anh (chép lời nếu video tiếng Anh, dịch nếu ngôn ngữ khác), rồi dịch sang ngôn ngữ đích
-    const sameLang = target === 'orig' || (L && target === L);
-    let task = 'transcribe';
-    if (!sameLang && L !== 'en') {
-      task = 'translate';
-      if (model.includes('turbo')) {
-        post('note', { text: 'Mô hình "rất chính xác" không hỗ trợ dịch — dùng mô hình "Chính xác" thay thế.' });
-        pipe = await loadASR('onnx-community/whisper-small', useGPU, lite);
-      }
-    }
-    const opts = { task };
-    if (L) opts.language = L;
-    post('status', { stage: task === 'translate' ? 'Đang nghe và dịch lời thoại…' : 'Đang nghe và chép lời thoại…', indet: false });
+    // 2) Nghe từng đoạn
+    post('status', { stage: auto ? 'Đang nghe, nhận diện ngôn ngữ từng đoạn và chép/dịch lời thoại…' : 'Đang nghe và chép lời thoại…', indet: false });
     const t0 = performance.now();
-    const segs = await transcribe(pipe, audio, opts, (p) => {
+    const segs = await transcribe(pipe, audio, planFor, (p) => {
       const el = (performance.now() - t0) / 1000;
       post('progress', { value: p, eta: p > 0.03 ? el / p - el : null });
     });
+    const langs = Object.entries(seen).sort((a, b) => b[1] - a[1]).map(([c]) => c);
+    const L = auto ? (langs[0] || null) : lang;
+    post('detected', { lang: L, langs });
     if (!segs.length) throw new Error('Không nghe thấy lời thoại nào trong video.');
 
     // 3) Dịch sang ngôn ngữ phụ đề đã chọn (thuộc tính .vi = nội dung phụ đề in lên video)
-    if (sameLang || target === 'en') segs.forEach(s => s.vi = s.src);
-    else {
+    segs.forEach(s => { if (s.done) s.vi = s.src; });
+    const todo = segs.filter(s => !s.done);
+    if (todo.length) {
       const cfg = MT_MODELS[target];
       if (!cfg) throw new Error('Chưa hỗ trợ ngôn ngữ phụ đề này.');
+      if (asrTr) { try { await asrTr.dispose(); } catch {} asrTr = null; }
       if (libName === 'v2' && asr) { try { await asr.dispose(); } catch {} asr = null; asrKey = ''; } // giải phóng bộ nhớ trên điện thoại
       const tr = await loadMT(target);
       post('status', { stage: `Đang dịch sang ${cfg.name}…`, indet: false });
@@ -585,8 +640,8 @@ self.onmessage = async (ev) => {
         }
         return outs.join(' ');
       };
-      for (let i = 0; i < segs.length; i += B) {
-        const batch = segs.slice(i, i + B);
+      for (let i = 0; i < todo.length; i += B) {
+        const batch = todo.slice(i, i + B);
         const outs = await run(batch.map(s => s.src), false);
         for (let k = 0; k < batch.length; k++) {
           const s = batch[k];
@@ -595,12 +650,12 @@ self.onmessage = async (ev) => {
           o = cleanText(o);
           s.vi = o && /[\p{L}\p{N}]/u.test(o) ? o : s.src;
         }
-        post('progress', { value: Math.min(1, (i + B) / segs.length) });
+        post('progress', { value: Math.min(1, (i + B) / todo.length) });
       }
     }
     segs.forEach(s => { s.vi = cleanText(s.vi); });
     const finalSegs = splitLongCues(segs.filter(s => s.vi && /[\p{L}\p{N}]/u.test(s.vi)));
-    post('result', { segments: finalSegs, lang: L, target: sameLang ? (L || 'orig') : target });
+    post('result', { segments: finalSegs, lang: L, langs, target: target === 'orig' ? (langs.length === 1 ? L : 'orig') : target });
   } catch (e) {
     console.error(e);
     post('error', { message: e?.message || String(e) });
@@ -758,7 +813,7 @@ async function onFile(file) {
 function checkResume() {
   const job = loadJob(), file = state.file;
   state.resume = !!(file && job && job.stage !== 'done' && sameFile(job, file) && job.segments?.length && (job.target || 'vi') === $('target').value);
-  if (state.resume) { state.segments = job.segments; state.lang = job.lang ?? null; state.subLang = job.subLang || 'vi'; }
+  if (state.resume) { state.segments = job.segments; state.lang = job.lang ?? null; state.langs = job.langs || []; state.subLang = job.subLang || 'vi'; }
 }
 $('file').addEventListener('change', (e) => onFile(e.target.files[0]));
 updateTargetNote();
@@ -833,7 +888,7 @@ function runAI(audio, model) {
       if (m.type === 'status') { $('stage').textContent = m.stage; $('sub').textContent = ''; setBar('bar', 0, !!m.indet); }
       else if (m.type === 'dl') { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; }
       else if (m.type === 'progress') { setBar('bar', m.value); $('sub').textContent = `${Math.round(m.value * 100)}%` + (m.eta != null ? ` · còn khoảng ${fmtDur(m.eta)}` : ''); }
-      else if (m.type === 'detected') { state.lang = m.lang; }
+      else if (m.type === 'detected') { state.lang = m.lang; state.langs = m.langs || []; }
       else if (m.type === 'note') { $('sub').textContent = m.text; }
       else if (m.type === 'device') { console.log('Thiết bị chạy AI:', m.device); }
       else if (m.type === 'result') resolve(m);
@@ -881,11 +936,12 @@ $('go').addEventListener('click', async () => {
     state.segments = result.segments;
     state.lang = result.lang;
     state.subLang = result.target;
+    state.langs = result.langs || [];
     $('stage').textContent = `Hoàn tất sau ${fmtDur((performance.now() - t0) / 1000)}`;
     $('sub').textContent = `${state.segments.length} câu phụ đề · mức "${MODEL_LABEL[model]}"`;
     setBar('bar', 1);
     worker?.terminate(); worker = null;   // giải phóng bộ nhớ AI trước khi lồng phụ đề (quan trọng trên điện thoại)
-    saveJob({ name: state.file.name, size: state.file.size, segments: state.segments, lang: state.lang, target: $('target').value, subLang: state.subLang, stage: 'ready', crashes: 0 });
+    saveJob({ name: state.file.name, size: state.file.size, segments: state.segments, lang: state.lang, langs: state.langs, target: $('target').value, subLang: state.subLang, stage: 'ready', crashes: 0 });
     await new Promise(r => setTimeout(r, 500));
     openEditor();
     await doBurn(false);
@@ -918,8 +974,11 @@ function refreshTrack() {
 
 function openEditor() {
   const L = state.lang;
-  $('detected').innerHTML = L
-    ? `<span class="pill">Ngôn ngữ gốc: ${LANG_NAMES[L] || L.toUpperCase()}</span>`
+  const langs = (state.langs && state.langs.length) ? state.langs : (L ? [L] : []);
+  const nm = (c) => LANG_NAMES[c] || c.toUpperCase();
+  $('detected').innerHTML = langs.length > 1
+    ? `<span class="pill">Video có ${langs.length} ngôn ngữ: ${langs.map(nm).join(', ')}</span>`
+    : langs.length ? `<span class="pill">Ngôn ngữ gốc: ${nm(langs[0])}</span>`
     : `<span class="pill">Ngôn ngữ gốc: không xác định — đã dịch qua tiếng Anh</span>`;
   const v = $('preview');
   if (state.previewUrl) { URL.revokeObjectURL(state.previewUrl); state.previewUrl = null; }
