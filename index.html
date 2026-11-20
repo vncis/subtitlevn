@@ -79,6 +79,18 @@ details.edit{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
 details.edit summary{cursor:pointer;font-weight:600;padding:6px 0;color:var(--accent)}
 details.edit video{margin-top:10px}
 .resume{margin-top:12px;padding:12px 14px;border-radius:12px;background:var(--accent-soft);font-size:14px}
+input[type=url],input[type=password],input[type=text]{font:inherit;font-size:16px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+details.cloud{margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:10px 14px}
+details.cloud summary{cursor:pointer;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+details.cloud .pill.on{background:var(--ok);color:#fff}
+.cloudBody{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+.cloudBody .btn{min-height:42px}
+label.chk{display:flex;gap:10px;align-items:flex-start;font-size:15px;cursor:pointer}
+label.chk input{width:20px;height:20px;margin-top:2px;accent-color:var(--accent);flex:none}
+.note a{color:var(--accent)}
+.okmsg{color:var(--ok)!important}
+.badmsg{color:var(--err)!important}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 </style>
 </head>
@@ -150,6 +162,22 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
       </label>
     </div>
     <div class="note hidden" id="targetNote"></div>
+
+    <details class="cloud" id="cloudBox">
+      <summary>AI đám mây cho điện thoại <span class="pill" id="cloudBadge">Đang tắt</span></summary>
+      <div class="cloudBody">
+        <label class="chk"><input type="checkbox" id="cloudOn"> Dùng AI đám mây để nghe lời thoại (khuyên dùng cho điện thoại)</label>
+        <label class="f">Địa chỉ trạm Cloudflare
+          <input type="url" id="cloudUrl" placeholder="https://phude-viet.ten-ban.workers.dev" autocomplete="off" autocapitalize="off" spellcheck="false">
+        </label>
+        <label class="f">Mã truy cập (mật khẩu bạn đặt ở trạm)
+          <input type="password" id="cloudCode" autocomplete="off" autocapitalize="off" spellcheck="false">
+        </label>
+        <button class="btn ghost" id="cloudTest" type="button">Kiểm tra kết nối</button>
+        <div class="note" id="cloudMsg"></div>
+        <div class="note">Chưa có trạm? Xem <a href="huong-dan.html" target="_blank" rel="noopener">hướng dẫn cài đặt</a> (miễn phí, khoảng 10 phút, làm một lần). Khi bật, chỉ phần <b>âm thanh</b> của video được gửi lên dịch vụ Groq để nghe lời thoại; việc dịch và lồng chữ vẫn làm trên máy.</div>
+      </div>
+    </details>
     <button class="btn block" id="go" disabled>Tạo phụ đề</button>
     <div class="note" id="envNote"></div>
   </section>
@@ -190,7 +218,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     </details>
   </section>
 
-  <footer>Video không được gửi đi đâu — mọi xử lý diễn ra trên thiết bị của bạn.</footer>
+  <footer>Hình ảnh video luôn được xử lý ngay trên thiết bị của bạn. Chỉ khi bật "AI đám mây", phần âm thanh mới được gửi lên Groq để nghe lời thoại.</footer>
 </div>
 
 <!-- ================= WORKER: nhận dạng giọng nói + dịch ================= -->
@@ -548,6 +576,14 @@ function tidy(segs, dur) {
 
 self.onmessage = async (ev) => {
   const { cmd, audio, model, useGPU, lang, lite, target } = ev.data;
+  if (cmd === 'finish') {
+    try {
+      const segments = await finishCloud(ev.data);
+      const langs = ev.data.langs || [];
+      post('result', { segments, lang: ev.data.lang || null, langs, target: target === 'orig' ? (langs.length === 1 ? langs[0] : 'orig') : target });
+    } catch (e) { console.error(e); post('error', { message: e?.message || String(e) }); }
+    return;
+  }
   if (cmd !== 'run') return;
   try {
     let pipe = await loadASR(model, useGPU, lite);
@@ -604,7 +640,16 @@ self.onmessage = async (ev) => {
     post('detected', { lang: L, langs });
     if (!segs.length) throw new Error('Không nghe thấy lời thoại nào trong video.');
 
-    // 3) Dịch sang ngôn ngữ phụ đề đã chọn (thuộc tính .vi = nội dung phụ đề in lên video)
+    const finalSegs = await finishSegments(segs, target);
+    post('result', { segments: finalSegs, lang: L, langs, target: target === 'orig' ? (langs.length === 1 ? L : 'orig') : target });
+  } catch (e) {
+    console.error(e);
+    post('error', { message: e?.message || String(e) });
+  }
+};
+
+// Dịch sang ngôn ngữ phụ đề đã chọn (thuộc tính .vi = nội dung phụ đề in lên video), làm sạch, chia câu dài
+async function finishSegments(segs, target) {
     segs.forEach(s => { if (s.done) s.vi = s.src; });
     const todo = segs.filter(s => !s.done);
     if (todo.length) {
@@ -654,13 +699,19 @@ self.onmessage = async (ev) => {
       }
     }
     segs.forEach(s => { s.vi = cleanText(s.vi); });
-    const finalSegs = splitLongCues(segs.filter(s => s.vi && /[\p{L}\p{N}]/u.test(s.vi)));
-    post('result', { segments: finalSegs, lang: L, langs, target: target === 'orig' ? (langs.length === 1 ? L : 'orig') : target });
-  } catch (e) {
-    console.error(e);
-    post('error', { message: e?.message || String(e) });
-  }
-};
+    return splitLongCues(segs.filter(s => s.vi && /[\p{L}\p{N}]/u.test(s.vi)));
+}
+
+// Lời thoại đã được AI đám mây nghe xong → chỉ còn dịch + làm sạch trên máy
+async function finishCloud(data) {
+  const { target, lite, duration } = data;
+  await useLib(lite ? 'v2' : 'v3');
+  let segs = (data.segs || []).map(s => ({ ...s, src: cleanText(s.src) }))
+    .filter(s => s.src && !JUNK.test(s.src) && /[\p{L}\p{N}]/u.test(s.src));
+  segs = tidy(segs, duration);
+  if (!segs.length) throw new Error('Không nghe thấy lời thoại nào trong video.');
+  return finishSegments(segs, target);
+}
 </script>
 
 <!-- ================= GIAO DIỆN & LỒNG PHỤ ĐỀ ================= -->
@@ -876,11 +927,182 @@ function getWorker() {
   return worker;
 }
 
+// =============== AI ĐÁM MÂY (Groq Whisper qua trạm Cloudflare) ===============
+const CLOUD_KEY = 'phudeviet_cloud_v1';
+const DEFAULT_CLOUD_URL = '';   // (tuỳ chọn) điền sẵn địa chỉ trạm ở đây để khỏi gõ trên từng máy
+function getCloud() {
+  let c = {};
+  try { c = JSON.parse(localStorage.getItem(CLOUD_KEY) || '{}'); } catch {}
+  const url = (c.url || DEFAULT_CLOUD_URL || '').trim();
+  return { on: c.on ?? (isMobile && !!url), url, code: c.code || '' };
+}
+function setCloud(p) { try { localStorage.setItem(CLOUD_KEY, JSON.stringify({ ...getCloud(), ...p })); } catch {} }
+const cloudReady = () => { const c = getCloud(); return c.on && /^https:\/\/\S+$/.test(c.url); };
+function refreshCloudUI() {
+  const c = getCloud(), ready = cloudReady();
+  $('cloudBadge').textContent = ready ? 'Đang bật' : (c.on ? 'Chưa có địa chỉ trạm' : 'Đang tắt');
+  $('cloudBadge').classList.toggle('on', ready);
+  $('model').disabled = ready;
+  $('envNote').textContent = ready
+    ? 'AI đám mây đang bật: phần nghe lời thoại (nặng nhất) chạy trên máy chủ Groq bằng mô hình Whisper large-v3 — nhanh, chính xác và nhẹ cho điện thoại.'
+    : baseEnvNote;
+}
+const baseEnvNote = $('envNote').textContent;
+(() => {
+  const c = getCloud();
+  $('cloudOn').checked = c.on; $('cloudUrl').value = c.url; $('cloudCode').value = c.code;
+  $('cloudBox').open = isMobile && !cloudReady();
+  $('cloudOn').onchange = () => { setCloud({ on: $('cloudOn').checked }); refreshCloudUI(); };
+  $('cloudUrl').onchange = () => { setCloud({ url: $('cloudUrl').value.trim() }); refreshCloudUI(); };
+  $('cloudCode').onchange = () => setCloud({ code: $('cloudCode').value });
+  $('cloudTest').onclick = testCloud;
+  refreshCloudUI();
+})();
+
+async function testCloud() {
+  setCloud({ url: $('cloudUrl').value.trim(), code: $('cloudCode').value });
+  const c = getCloud(), msg = $('cloudMsg');
+  msg.className = 'note';
+  if (!/^https:\/\/\S+$/.test(c.url)) { msg.textContent = 'Địa chỉ trạm phải bắt đầu bằng https://'; msg.classList.add('badmsg'); return; }
+  msg.textContent = 'Đang kiểm tra…';
+  try {
+    const r = await fetch(c.url.replace(/\/+$/, '') + '/', { headers: c.code ? { 'X-Access-Code': c.code } : {} });
+    let j = null; try { j = await r.json(); } catch {}
+    if (r.ok && j?.ok) {
+      msg.textContent = '✓ Kết nối tốt! Trạm đã sẵn sàng.'; msg.classList.add('okmsg');
+      if (!$('cloudOn').checked) { $('cloudOn').checked = true; setCloud({ on: true }); }
+    } else {
+      msg.textContent = '✗ ' + (j?.error?.message || `Trạm trả lỗi ${r.status}`); msg.classList.add('badmsg');
+    }
+  } catch (e) {
+    msg.textContent = '✗ Không kết nối được tới trạm. Kiểm tra lại địa chỉ (và mạng internet).'; msg.classList.add('badmsg');
+  }
+  refreshCloudUI();
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function rmsOf(a, s = 0, e = a.length) {
+  s = Math.max(0, s | 0); e = Math.min(a.length, e | 0);
+  if (e <= s) return 0;
+  let sum = 0, n = 0;
+  for (let i = s; i < e; i += 4) { sum += a[i] * a[i]; n++; }
+  return Math.sqrt(sum / Math.max(1, n));
+}
+// Cắt âm thanh thành các phần ≤ 5 phút, điểm cắt rơi vào chỗ im lặng nhất (không cắt ngang câu)
+function cloudSplitPoints(audio, maxSec = 300) {
+  const pts = [0], N = audio.length, win = SR / 4;
+  let start = 0;
+  while (N - start > maxSec * SR) {
+    const target = start + maxSec * SR;
+    let best = target, bestE = Infinity;
+    for (let p = target - 10 * SR; p <= target; p += SR / 10) {
+      const e = rmsOf(audio, p, p + win);
+      if (e < bestE) { bestE = e; best = p; }
+    }
+    best = Math.round(best + win / 2);
+    pts.push(best); start = best;
+  }
+  pts.push(N);
+  return pts;
+}
+// Âm thanh 16 kHz mono → file WAV 16-bit (5 phút ≈ 9,6 MB, dưới giới hạn 25 MB)
+function encodeWAV(f32, sr = SR) {
+  const n = f32.length, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) { const s = Math.max(-1, Math.min(1, f32[i])); v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true); }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+function cloudError(msg) { const e = new Error(msg); e.cloud = true; return e; }
+
+async function cloudCall(blob, task, language, prompt, onWait) {
+  const c = getCloud();
+  const fd = new FormData();
+  fd.append('file', blob, 'audio.wav');
+  fd.append('model', 'whisper-large-v3');
+  fd.append('response_format', 'verbose_json');
+  fd.append('temperature', '0');
+  if (task === 'transcribe') {
+    fd.append('timestamp_granularities[]', 'segment');
+    if (language) fd.append('language', language);
+  }
+  if (prompt) fd.append('prompt', prompt);
+  const url = c.url.replace(/\/+$/, '') + '/?task=' + task;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    let r;
+    try {
+      r = await fetch(url, { method: 'POST', headers: c.code ? { 'X-Access-Code': c.code } : {}, body: fd });
+    } catch (e) {
+      if (attempt < 2) { onWait?.(5, 'Mạng chập chờn'); await sleep(5000); continue; }
+      throw cloudError('Không gửi được âm thanh tới trạm đám mây. Kiểm tra mạng internet và địa chỉ trạm.');
+    }
+    if ((r.status === 429 || r.status >= 500) && attempt < 5) {
+      const wait = Math.min(90, Number(r.headers.get('Retry-After')) || 10 * (attempt + 1));
+      onWait?.(wait, r.status === 429 ? 'Dịch vụ đang giới hạn lượt dùng' : 'Dịch vụ đang bận');
+      await sleep(wait * 1000);
+      continue;
+    }
+    const txt = await r.text();
+    let j = null; try { j = JSON.parse(txt); } catch {}
+    if (!r.ok) {
+      const m = j?.error?.message || txt.slice(0, 200);
+      if (r.status === 401) throw cloudError(/api key/i.test(m) ? 'Mã API Groq trong trạm không đúng (biến GROQ_API_KEY).' : 'Sai mã truy cập — kiểm tra lại ở mục "AI đám mây".');
+      if (r.status === 403) throw cloudError('Trạm từ chối trang web này — kiểm tra biến ALLOWED_ORIGIN trong Cloudflare.');
+      throw cloudError(`Lỗi từ AI đám mây (${r.status}): ${m}`);
+    }
+    if (!j) throw cloudError('Trạm trả về dữ liệu không đọc được.');
+    return j;
+  }
+  throw cloudError('Dịch vụ đám mây đang quá tải. Hãy thử lại sau vài phút.');
+}
+
+const WHISPER_NAMES = { english:'en', vietnamese:'vi', russian:'ru', ukrainian:'uk', chinese:'zh', japanese:'ja', korean:'ko', french:'fr', german:'de', spanish:'es', thai:'th', indonesian:'id', arabic:'ar', hindi:'hi', italian:'it', portuguese:'pt', dutch:'nl', turkish:'tr', polish:'pl', malay:'ms', khmer:'km', lao:'lo', tagalog:'tl', cantonese:'yue' };
+const toLangCode = (s) => { if (!s) return null; s = String(s).toLowerCase(); return /^[a-z]{2,3}$/.test(s) ? s : (WHISPER_NAMES[s] || null); };
+
+// Nghe lời thoại bằng AI đám mây → [{start, end, src, done}]
+async function cloudTranscribe(audio, target, langSel, onProg, onWait) {
+  const sameLang = target === 'orig' || (langSel !== 'auto' && langSel === target);
+  // Phụ đề cùng ngôn ngữ video → chép lời; video tiếng Anh → chép lời tiếng Anh;
+  // còn lại (kể cả video nhiều thứ tiếng) → AI dịch lời nói sang tiếng Anh, sau đó máy dịch sang ngôn ngữ phụ đề
+  const task = (sameLang || langSel === 'en') ? 'transcribe' : 'translate';
+  const language = task === 'transcribe' && langSel !== 'auto' ? langSel : null;
+  const done = sameLang || target === 'en';
+  const pts = cloudSplitPoints(audio), n = pts.length - 1;
+  const segs = [], seen = {};
+  let prompt = '';
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[i + 1], piece = audio.subarray(a, b);
+    if (rmsOf(piece) < 0.002) { onProg((i + 1) / n, i + 1, n); continue; }
+    onProg(i / n, i + 1, n);
+    const j = await cloudCall(encodeWAV(piece), task, language, prompt, onWait);
+    if (task === 'transcribe') { const lc = toLangCode(j.language); if (lc) seen[lc] = (seen[lc] || 0) + (b - a); }
+    const list = (j.segments && j.segments.length) ? j.segments
+      : ((j.text || '').trim() ? [{ start: 0, end: (b - a) / SR, text: j.text }] : []);
+    for (const s of list) {
+      if ((s.no_speech_prob ?? 0) > 0.6 && (s.avg_logprob ?? 0) < -0.7) continue;   // đoạn im lặng bị "nghe nhầm"
+      const S = a / SR + (s.start || 0), E = a / SR + Math.max(s.end || 0, (s.start || 0) + 0.3);
+      if (rmsOf(audio, S * SR, E * SR) < 0.0015) continue;
+      const text = (s.text || '').trim();
+      if (text) segs.push({ start: S, end: Math.min(E, b / SR), src: text, done });
+    }
+    prompt = list.map(s => s.text || '').join(' ').trim().slice(-200);
+    onProg((i + 1) / n, i + 1, n);
+  }
+  const langs = Object.entries(seen).sort((x, y) => y[1] - x[1]).map(([c]) => c);
+  return { segs, langs, lang: langs[0] || (langSel !== 'auto' ? langSel : null) };
+}
+
 const MODEL_ORDER = ['onnx-community/whisper-large-v3-turbo', 'onnx-community/whisper-small', 'onnx-community/whisper-base', 'onnx-community/whisper-tiny'];
 const MODEL_LABEL = { 'onnx-community/whisper-tiny': 'Nhanh nhất', 'onnx-community/whisper-base': 'Cân bằng', 'onnx-community/whisper-small': 'Chính xác', 'onnx-community/whisper-large-v3-turbo': 'Rất chính xác' };
 const isOOM = (e) => /out of memory|error code = 6|OrtRun|RangeError|allocation|memory access|Aborted|bad_alloc/i.test(String(e?.message || e));
 
 function runAI(audio, model) {
+  return runWorker({ cmd: 'run', audio, model, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS, target: $('target').value }, [audio.buffer]);
+}
+function runWorker(msg, transfer = []) {
   const w = getWorker();
   return new Promise((resolve, reject) => {
     w.onmessage = (ev) => {
@@ -896,7 +1118,7 @@ function runAI(audio, model) {
     };
     // Lỗi không bắt được trong worker (thường là tràn bộ nhớ làm worker chết)
     w.onerror = (e) => reject(new Error(e.message || 'Out of memory'));
-    w.postMessage({ cmd: 'run', audio, model, useGPU: hasGPU && !isIOS, lang: $('lang').value, lite: isIOS, target: $('target').value }, [audio.buffer]);
+    w.postMessage(msg, transfer);
   });
 }
 
@@ -914,7 +1136,27 @@ $('go').addEventListener('click', async () => {
     return;
   }
   try {
-    let result = null;
+    let result = null, usedLabel = null;
+    if (cloudReady()) {
+      $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
+      setBar('bar', 0);
+      const audio = await extractAudio(state.file, (p) => setBar('bar', p));
+      const duration = audio.length / SR;
+      $('stage').textContent = 'Đang gửi âm thanh lên AI đám mây để nghe lời thoại…';
+      setBar('bar', 0);
+      const t1 = performance.now();
+      const c = await cloudTranscribe(audio, $('target').value, $('lang').value,
+        (p, k, n) => {
+          setBar('bar', p);
+          const el = (performance.now() - t1) / 1000;
+          $('sub').textContent = `Phần ${k}/${n} · ${Math.round(p * 100)}%` + (p > 0.05 ? ` · còn khoảng ${fmtDur(el / p - el)}` : '');
+        },
+        (wait, why) => { $('sub').textContent = `${why} — chờ ${wait} giây rồi gửi tiếp…`; });
+      if (!c.segs.length) throw cloudError('Không nghe thấy lời thoại nào trong video.');
+      $('stage').textContent = 'AI đám mây đã nghe xong — đang dịch trên máy…'; $('sub').textContent = '';
+      result = await runWorker({ cmd: 'finish', segs: c.segs, target: $('target').value, lite: isIOS, duration, lang: c.lang, langs: c.langs });
+      usedLabel = 'AI đám mây (Whisper large-v3)';
+    }
     while (!result) {
       $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
       setBar('bar', 0);
@@ -938,7 +1180,7 @@ $('go').addEventListener('click', async () => {
     state.subLang = result.target;
     state.langs = result.langs || [];
     $('stage').textContent = `Hoàn tất sau ${fmtDur((performance.now() - t0) / 1000)}`;
-    $('sub').textContent = `${state.segments.length} câu phụ đề · mức "${MODEL_LABEL[model]}"`;
+    $('sub').textContent = `${state.segments.length} câu phụ đề · ${usedLabel || `mức "${MODEL_LABEL[model]}"`}`;
     setBar('bar', 1);
     worker?.terminate(); worker = null;   // giải phóng bộ nhớ AI trước khi lồng phụ đề (quan trọng trên điện thoại)
     saveJob({ name: state.file.name, size: state.file.size, segments: state.segments, lang: state.lang, langs: state.langs, target: $('target').value, subLang: state.subLang, stage: 'ready', crashes: 0 });
@@ -947,8 +1189,10 @@ $('go').addEventListener('click', async () => {
     await doBurn(false);
   } catch (e) {
     console.error(e);
-    const oom = isOOM(e);
-    $('runErr').textContent = oom
+    const oom = !e.cloud && isOOM(e);
+    $('runErr').textContent = e.cloud
+      ? 'Lỗi: ' + e.message + '\nBạn có thể thử lại, hoặc tắt "AI đám mây" để chạy ngay trên máy.'
+      : oom
       ? 'Thiết bị không đủ bộ nhớ để chạy AI, kể cả ở mức nhẹ nhất.\nGợi ý: đóng bớt các tab/ứng dụng khác rồi thử lại, hoặc dùng máy tính (Chrome/Edge).\n(Chi tiết: ' + (e.message || e) + ')'
       : 'Lỗi: ' + (e.message || e) + '\nGợi ý: thử mức chính xác thấp hơn, hoặc dùng Chrome/Edge bản mới.';
     show('runErr');

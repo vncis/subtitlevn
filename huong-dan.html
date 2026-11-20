@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cài AI Đám Mây</title>
+<meta name="description" content="Hướng dẫn tạo mã API Groq và trạm trung chuyển Cloudflare cho ứng dụng Phụ Đề Việt.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#f6f4ef;--card:#fff;--ink:#1d1b17;--muted:#6b665c;--line:#e4dfd4;--accent:#c2410c;--accent-ink:#fff;--accent-soft:#fdeee4;--ok:#15803d;--code:#1f1c17;--code-ink:#f3efe7}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#15130f;--card:#1f1c17;--ink:#f3efe7;--muted:#a39d90;--line:#36312a;--accent:#fb923c;--accent-ink:#1a1206;--accent-soft:#3a2516;--ok:#4ade80;--code:#0e0d0a}}
+:root[data-theme="dark"]{--bg:#15130f;--card:#1f1c17;--ink:#f3efe7;--muted:#a39d90;--line:#36312a;--accent:#fb923c;--accent-ink:#1a1206;--accent-soft:#3a2516;--ok:#4ade80;--code:#0e0d0a}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font-family:"Be Vietnam Pro",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.6;font-size:16px}
+.wrap{max-width:760px;margin:0 auto;padding:20px 16px 64px}
+h1{font-size:26px;line-height:1.2;margin:8px 0 6px}
+.lead{color:var(--muted);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px}
+h2{font-size:18px;margin:0 0 4px;display:flex;gap:10px;align-items:center}
+.tag{display:inline-grid;place-items:center;min-width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-weight:700;font-size:14px}
+.time{color:var(--muted);font-size:14px;margin:0 0 10px}
+ol{padding-left:22px;margin:8px 0}li{margin:8px 0}
+b{font-weight:600}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;background:var(--accent-soft);padding:1px 6px;border-radius:6px;overflow-wrap:anywhere}
+a{color:var(--accent)}
+table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+th,td{border:1px solid var(--line);padding:8px;text-align:left;vertical-align:top}
+th{background:var(--accent-soft)}
+pre{background:var(--code);color:var(--code-ink);border-radius:12px;padding:14px;overflow:auto;max-height:340px;font-size:12.5px;line-height:1.5;margin:10px 0 0}
+.btn{font:inherit;font-weight:600;border:0;border-radius:12px;padding:12px 18px;cursor:pointer;background:var(--accent);color:var(--accent-ink);min-height:46px;width:100%;margin-top:10px}
+.tip{background:var(--accent-soft);border-radius:12px;padding:10px 14px;font-size:14px;margin:10px 0}
+.ok{color:var(--ok);font-weight:600}
+.muted{color:var(--muted);font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Cài "AI đám mây" cho Phụ Đề Việt</h1>
+  <p class="lead">Làm một lần, khoảng 10 phút, hoàn toàn miễn phí. Sau đó điện thoại chỉ gửi phần âm thanh lên máy chủ AI để nghe lời thoại — không còn bị thiếu bộ nhớ.</p>
+
+  <div class="card">
+    <h2>Bạn sẽ tạo 2 thứ</h2>
+    <table>
+      <tr><th>Thứ cần tạo</th><th>Để làm gì</th></tr>
+      <tr><td><b>Mã API Groq</b></td><td>"Chìa khoá" để dùng AI nghe lời thoại Whisper large-v3 của Groq (miễn phí).</td></tr>
+      <tr><td><b>Trạm Cloudflare</b></td><td>Trạm trung chuyển nhỏ giữ chìa khoá giúp bạn. Cần có vì Groq không cho trang web gọi thẳng, và để chìa khoá không bị lộ trên trang.</td></tr>
+    </table>
+    <div class="tip">Nên làm phần <b>A</b> và <b>B</b> trên <b>máy tính</b> (dễ sao chép, dán code). Phần <b>C</b> làm trên điện thoại.</div>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag">A</span>Tạo mã API Groq</h2>
+    <p class="time">Khoảng 2 phút</p>
+    <ol>
+      <li>Mở <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a> → đăng ký / đăng nhập (bằng Google hoặc email).</li>
+      <li>Ở menu bên trái chọn <b>API Keys</b> (hoặc mở thẳng <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a>).</li>
+      <li>Bấm <b>Create API Key</b> → đặt tên, ví dụ <code>phude-viet</code> → bấm tạo.</li>
+      <li><b>Sao chép mã ngay</b> (thường bắt đầu bằng <code>gsk_</code>) và dán tạm vào Ghi chú. Groq <b>chỉ hiện mã này một lần</b>; nếu lỡ mất thì xoá và tạo mã mới.</li>
+    </ol>
+    <p class="muted">Không chia sẻ mã này cho ai. Ở các bước sau bạn chỉ dán nó vào Cloudflare.</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag">B</span>Tạo trạm Cloudflare</h2>
+    <p class="time">Khoảng 6–8 phút</p>
+    <ol>
+      <li>Mở <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">dash.cloudflare.com</a> → đăng ký tài khoản miễn phí (xác nhận email nếu được hỏi).</li>
+      <li>Ở menu trái chọn <b>Workers &amp; Pages</b> (có thể nằm trong mục <b>Compute</b>) → bấm <b>Create application</b> → chọn <b>Create Worker</b> / mẫu <b>Hello World</b>.</li>
+      <li>Đặt tên Worker là <code>phude-viet</code> → bấm <b>Deploy</b>. Cloudflare tạo cho bạn một địa chỉ dạng<br><code>https://phude-viet.&lt;tên-tài-khoản&gt;.workers.dev</code></li>
+      <li>Bấm <b>Edit code</b>. <b>Xoá hết</b> code mẫu bên trái, rồi dán toàn bộ code ở khung dưới (bấm nút "Sao chép code") → bấm <b>Deploy</b>.</li>
+      <li>Quay lại trang của Worker → <b>Settings</b> → mục <b>Variables and Secrets</b> → <b>Add</b>, thêm lần lượt 3 dòng:
+        <table>
+          <tr><th>Type</th><th>Variable name</th><th>Value</th></tr>
+          <tr><td>Secret</td><td><code>GROQ_API_KEY</code></td><td>mã Groq ở bước A (gsk_…)</td></tr>
+          <tr><td>Secret</td><td><code>ACCESS_CODE</code></td><td>một mật khẩu bạn tự đặt, ví dụ <code>PhuDe2026!</code></td></tr>
+          <tr><td>Text</td><td><code>ALLOWED_ORIGIN</code></td><td><code>https://vncis.github.io</code></td></tr>
+        </table>
+        Rồi bấm <b>Deploy</b> để lưu.
+      </li>
+      <li>Mở địa chỉ trạm trên trình duyệt. Nếu thấy dòng <span class="ok">"Tram Phu De Viet dang chay"</span> là trạm đã hoạt động.</li>
+    </ol>
+    <div class="tip"><b>ALLOWED_ORIGIN</b> phải đúng địa chỉ trang web của bạn: bắt đầu bằng <code>https://</code>, <b>không</b> có dấu <code>/</code> và tên thư mục ở cuối. Nếu ứng dụng nằm ở <code>https://vncis.github.io/phude-viet/</code> thì vẫn chỉ điền <code>https://vncis.github.io</code>.</div>
+
+    <p style="margin:14px 0 0"><b>Code của trạm</b> (file <code>cloudflare-worker.js</code>):</p>
+    <button class="btn" id="copy">Sao chép code</button>
+    <pre id="code">// =====================================================================
+//  TRẠM TRUNG CHUYỂN &quot;PHỤ ĐỀ VIỆT&quot;  →  Groq Whisper (AI nghe lời thoại)
+//  Dán toàn bộ file này vào Cloudflare Worker (xem file huong-dan.html).
+//
+//  Biến môi trường cần đặt trong Cloudflare (Settings → Variables and Secrets):
+//    GROQ_API_KEY   (Secret, bắt buộc)  — mã API lấy ở console.groq.com
+//    ACCESS_CODE    (Secret, nên có)    — mật khẩu tự đặt; nhập vào ứng dụng
+//    ALLOWED_ORIGIN (Text, nên có)      — địa chỉ trang web được phép dùng trạm,
+//                                         ví dụ: https://vncis.github.io
+//
+//  Trạm chỉ chuyển tiếp nguyên vẹn file âm thanh lên Groq (không đọc, không lưu),
+//  thêm mã API vào, rồi trả kết quả về ứng dụng.
+// =====================================================================
+
+const GROQ = &#x27;https://api.groq.com/openai/v1/audio/&#x27;;
+const MAX_BYTES = 25 * 1024 * 1024; // giới hạn file của gói miễn phí Groq
+
+export default {
+  async fetch(request, env) {
+    const origin = request.headers.get(&#x27;Origin&#x27;) || &#x27;&#x27;;
+    const allowed = String(env.ALLOWED_ORIGIN || &#x27;*&#x27;)
+      .split(&#x27;,&#x27;).map(s =&gt; s.trim().replace(/\/+$/, &#x27;&#x27;)).filter(Boolean);
+    const originOK = allowed.includes(&#x27;*&#x27;) || (origin &amp;&amp; allowed.includes(origin));
+
+    const cors = {
+      &#x27;Access-Control-Allow-Origin&#x27;: originOK ? (origin || &#x27;*&#x27;) : &#x27;null&#x27;,
+      &#x27;Access-Control-Allow-Methods&#x27;: &#x27;GET, POST, OPTIONS&#x27;,
+      &#x27;Access-Control-Allow-Headers&#x27;: &#x27;Content-Type, X-Access-Code&#x27;,
+      &#x27;Access-Control-Expose-Headers&#x27;: &#x27;Retry-After&#x27;,
+      &#x27;Access-Control-Max-Age&#x27;: &#x27;86400&#x27;,
+      &#x27;Vary&#x27;: &#x27;Origin&#x27;,
+    };
+    const json = (obj, status = 200, extra = {}) =&gt;
+      new Response(JSON.stringify(obj), {
+        status,
+        headers: { ...cors, &#x27;Content-Type&#x27;: &#x27;application/json; charset=utf-8&#x27;, ...extra },
+      });
+
+    if (request.method === &#x27;OPTIONS&#x27;) return new Response(null, { status: 204, headers: cors });
+
+    // Mở địa chỉ trạm bằng trình duyệt → chỉ báo trạm đang chạy (không lộ gì)
+    if (request.method === &#x27;GET&#x27; &amp;&amp; !origin) {
+      return new Response(&#x27;Tram Phu De Viet dang chay. Hay dung ung dung de ket noi.&#x27;, {
+        headers: { &#x27;Content-Type&#x27;: &#x27;text/plain; charset=utf-8&#x27; },
+      });
+    }
+
+    if (!originOK) return json({ error: { message: &#x27;Trang web này không được phép dùng trạm (kiểm tra ALLOWED_ORIGIN).&#x27; } }, 403);
+    if (env.ACCESS_CODE &amp;&amp; request.headers.get(&#x27;X-Access-Code&#x27;) !== env.ACCESS_CODE) {
+      return json({ error: { message: &#x27;Sai mã truy cập.&#x27; } }, 401);
+    }
+    if (!env.GROQ_API_KEY) return json({ error: { message: &#x27;Trạm chưa có GROQ_API_KEY.&#x27; } }, 500);
+
+    // Ứng dụng bấm &quot;Kiểm tra kết nối&quot;
+    if (request.method === &#x27;GET&#x27;) return json({ ok: true, service: &#x27;phude-viet&#x27; });
+    if (request.method !== &#x27;POST&#x27;) return json({ error: { message: &#x27;Method not allowed&#x27; } }, 405);
+
+    const url = new URL(request.url);
+    const task = url.searchParams.get(&#x27;task&#x27;) === &#x27;translate&#x27; ? &#x27;translations&#x27; : &#x27;transcriptions&#x27;;
+    const len = Number(request.headers.get(&#x27;Content-Length&#x27;) || 0);
+    if (len &gt; MAX_BYTES + 1024 * 1024) return json({ error: { message: &#x27;File âm thanh quá lớn (tối đa 25 MB).&#x27; } }, 413);
+
+    // Chuyển tiếp nguyên vẹn (không phân tích file → nhanh, không tốn CPU của trạm)
+    const upstream = await fetch(GROQ + task, {
+      method: &#x27;POST&#x27;,
+      headers: {
+        Authorization: `Bearer ${env.GROQ_API_KEY}`,
+        &#x27;Content-Type&#x27;: request.headers.get(&#x27;Content-Type&#x27;) || &#x27;application/octet-stream&#x27;,
+      },
+      body: request.body,
+    });
+
+    const headers = {
+      ...cors,
+      &#x27;Content-Type&#x27;: upstream.headers.get(&#x27;Content-Type&#x27;) || &#x27;application/json; charset=utf-8&#x27;,
+    };
+    const ra = upstream.headers.get(&#x27;retry-after&#x27;);
+    if (ra) headers[&#x27;Retry-After&#x27;] = ra;
+    return new Response(upstream.body, { status: upstream.status, headers });
+  },
+};
+</pre>
+  </div>
+
+  <div class="card">
+    <h2><span class="tag">C</span>Kết nối ứng dụng trên điện thoại</h2>
+    <p class="time">1 phút, làm trên từng điện thoại / máy tính muốn dùng</p>
+    <ol>
+      <li>Mở ứng dụng Phụ Đề Việt → mở mục <b>"AI đám mây cho điện thoại"</b>.</li>
+      <li>Dán <b>địa chỉ trạm</b> (https://phude-viet.….workers.dev) và nhập <b>mã truy cập</b> (ACCESS_CODE).</li>
+      <li>Bấm <b>Kiểm tra kết nối</b> → thấy <span class="ok">✓ Kết nối tốt</span> là xong. Ô "Dùng AI đám mây" sẽ tự bật.</li>
+      <li>Từ giờ chọn video và bấm <b>Tạo phụ đề</b> như bình thường. Ứng dụng nhớ cài đặt, lần sau không cần nhập lại.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>Nếu gặp lỗi</h2>
+    <table>
+      <tr><th>Ứng dụng báo</th><th>Cách sửa</th></tr>
+      <tr><td>Không kết nối được tới trạm</td><td>Kiểm tra lại địa chỉ trạm (phải bắt đầu bằng https:// và đúng chính tả), và mạng internet.</td></tr>
+      <tr><td>Sai mã truy cập</td><td>Mã nhập trong ứng dụng phải giống hệt ACCESS_CODE (phân biệt chữ hoa/thường).</td></tr>
+      <tr><td>Trạm từ chối trang web này</td><td>Sửa ALLOWED_ORIGIN cho đúng địa chỉ trang (xem lưu ý ở phần B), rồi bấm Deploy.</td></tr>
+      <tr><td>Mã API Groq trong trạm không đúng</td><td>Tạo mã mới ở Groq, sửa lại GROQ_API_KEY trong Cloudflare, rồi Deploy.</td></tr>
+      <tr><td>Dịch vụ đang giới hạn lượt dùng</td><td>Gói miễn phí giới hạn số giờ âm thanh mỗi giờ/ngày. Ứng dụng tự chờ rồi gửi tiếp; nếu vẫn báo, thử lại sau.</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Cần biết</h2>
+    <ul>
+      <li><b>Chi phí:</b> miễn phí trong giới hạn. Groq miễn phí hiện cho khoảng vài giờ âm thanh mỗi ngày (xem con số chính xác ở <a href="https://console.groq.com/settings/limits" target="_blank" rel="noopener">trang giới hạn của bạn</a>); Cloudflare miễn phí 100.000 lượt gọi mỗi ngày.</li>
+      <li><b>Dung lượng mạng:</b> mỗi phút video gửi lên khoảng 2 MB âm thanh (video 20 phút ≈ 40 MB). Nên dùng Wi-Fi.</li>
+      <li><b>Riêng tư:</b> chỉ âm thanh được gửi lên Groq để nghe lời thoại; hình ảnh, việc dịch và lồng chữ vẫn làm trên máy của bạn. Trạm không lưu lại gì.</li>
+      <li>Muốn chạy hoàn toàn trên máy như trước: tắt ô "Dùng AI đám mây" trong ứng dụng.</li>
+    </ul>
+  </div>
+  <p class="muted" style="text-align:center"><a href="./">← Quay lại ứng dụng Phụ Đề Việt</a></p>
+</div>
+<script>
+document.getElementById('copy').onclick = async () => {
+  const t = document.getElementById('code').textContent, b = document.getElementById('copy');
+  try { await navigator.clipboard.writeText(t); }
+  catch { const r = document.createRange(); r.selectNodeContents(document.getElementById('code')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand('copy'); }
+  b.textContent = '✓ Đã sao chép — dán vào Cloudflare'; setTimeout(() => b.textContent = 'Sao chép code', 3000);
+};
+</script>
+</body>
+</html>
