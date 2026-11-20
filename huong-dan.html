@@ -38,13 +38,13 @@ pre{background:var(--code);color:var(--code-ink);border-radius:12px;padding:14px
 <body>
 <div class="wrap">
   <h1>Cài "AI đám mây" cho Phụ Đề Việt</h1>
-  <p class="lead">Làm một lần, khoảng 10 phút, hoàn toàn miễn phí. Sau đó điện thoại chỉ gửi phần âm thanh lên máy chủ AI để nghe lời thoại — không còn bị thiếu bộ nhớ.</p>
+  <p class="lead">Làm một lần, khoảng 10 phút, hoàn toàn miễn phí. Sau đó việc nghe và dịch lời thoại chạy trên máy chủ AI — điện thoại không còn bị thiếu bộ nhớ.</p>
 
   <div class="card">
     <h2>Bạn sẽ tạo 2 thứ</h2>
     <table>
       <tr><th>Thứ cần tạo</th><th>Để làm gì</th></tr>
-      <tr><td><b>Mã API Groq</b></td><td>"Chìa khoá" để dùng AI nghe lời thoại Whisper large-v3 của Groq (miễn phí).</td></tr>
+      <tr><td><b>Mã API Groq</b></td><td>"Chìa khoá" để dùng AI của Groq (miễn phí): Whisper large-v3 nghe lời thoại và AI ngôn ngữ dịch phụ đề.</td></tr>
       <tr><td><b>Trạm Cloudflare</b></td><td>Trạm trung chuyển nhỏ giữ chìa khoá giúp bạn. Cần có vì Groq không cho trang web gọi thẳng, và để chìa khoá không bị lộ trên trang.</td></tr>
     </table>
     <div class="tip">Nên làm phần <b>A</b> và <b>B</b> trên <b>máy tính</b> (dễ sao chép, dán code). Phần <b>C</b> làm trên điện thoại.</div>
@@ -95,11 +95,16 @@ pre{background:var(--code);color:var(--code-ink);border-radius:12px;padding:14px
 //    ALLOWED_ORIGIN (Text, nên có)      — địa chỉ trang web được phép dùng trạm,
 //                                         ví dụ: https://vncis.github.io
 //
-//  Trạm chỉ chuyển tiếp nguyên vẹn file âm thanh lên Groq (không đọc, không lưu),
+//  Trạm chỉ chuyển tiếp nguyên vẹn yêu cầu lên Groq (không đọc, không lưu),
 //  thêm mã API vào, rồi trả kết quả về ứng dụng.
+//    ?task=transcribe → nghe &amp; chép lời (Whisper)
+//    ?task=translate  → nghe &amp; dịch lời nói sang tiếng Anh (Whisper)
+//    ?task=chat       → dịch phụ đề sang ngôn ngữ đã chọn (AI ngôn ngữ)
+//  Phiên bản trạm: 2
 // =====================================================================
 
-const GROQ = &#x27;https://api.groq.com/openai/v1/audio/&#x27;;
+const GROQ = &#x27;https://api.groq.com/openai/v1/&#x27;;
+const ENDPOINTS = { transcribe: &#x27;audio/transcriptions&#x27;, translate: &#x27;audio/translations&#x27;, chat: &#x27;chat/completions&#x27; };
 const MAX_BYTES = 25 * 1024 * 1024; // giới hạn file của gói miễn phí Groq
 
 export default {
@@ -139,11 +144,11 @@ export default {
     if (!env.GROQ_API_KEY) return json({ error: { message: &#x27;Trạm chưa có GROQ_API_KEY.&#x27; } }, 500);
 
     // Ứng dụng bấm &quot;Kiểm tra kết nối&quot;
-    if (request.method === &#x27;GET&#x27;) return json({ ok: true, service: &#x27;phude-viet&#x27; });
+    if (request.method === &#x27;GET&#x27;) return json({ ok: true, service: &#x27;phude-viet&#x27;, version: 2 });
     if (request.method !== &#x27;POST&#x27;) return json({ error: { message: &#x27;Method not allowed&#x27; } }, 405);
 
     const url = new URL(request.url);
-    const task = url.searchParams.get(&#x27;task&#x27;) === &#x27;translate&#x27; ? &#x27;translations&#x27; : &#x27;transcriptions&#x27;;
+    const task = ENDPOINTS[url.searchParams.get(&#x27;task&#x27;)] || ENDPOINTS.transcribe;
     const len = Number(request.headers.get(&#x27;Content-Length&#x27;) || 0);
     if (len &gt; MAX_BYTES + 1024 * 1024) return json({ error: { message: &#x27;File âm thanh quá lớn (tối đa 25 MB).&#x27; } }, 413);
 
@@ -181,6 +186,16 @@ export default {
   </div>
 
   <div class="card">
+    <h2>Cập nhật code trạm (khi có bản mới)</h2>
+    <ol>
+      <li>Vào Cloudflare → <b>Workers &amp; Pages</b> → bấm vào <code>phude-viet</code> → <b>Edit code</b>.</li>
+      <li>Xoá hết code cũ, dán code mới ở phần B (nút "Sao chép code") → bấm <b>Deploy</b>.</li>
+      <li>Không cần thêm lại 3 biến GROQ_API_KEY / ACCESS_CODE / ALLOWED_ORIGIN — chúng vẫn được giữ.</li>
+      <li>Trong ứng dụng bấm <b>Kiểm tra kết nối</b>: thấy "✓ Kết nối tốt! … (nghe + dịch)" là đã dùng code mới.</li>
+    </ol>
+  </div>
+
+  <div class="card">
     <h2>Nếu gặp lỗi</h2>
     <table>
       <tr><th>Ứng dụng báo</th><th>Cách sửa</th></tr>
@@ -188,6 +203,7 @@ export default {
       <tr><td>Sai mã truy cập</td><td>Mã nhập trong ứng dụng phải giống hệt ACCESS_CODE (phân biệt chữ hoa/thường).</td></tr>
       <tr><td>Trạm từ chối trang web này</td><td>Sửa ALLOWED_ORIGIN cho đúng địa chỉ trang (xem lưu ý ở phần B), rồi bấm Deploy.</td></tr>
       <tr><td>Mã API Groq trong trạm không đúng</td><td>Tạo mã mới ở Groq, sửa lại GROQ_API_KEY trong Cloudflare, rồi Deploy.</td></tr>
+      <tr><td>Trạm đang dùng code cũ</td><td>Làm theo mục "Cập nhật code trạm" ở trên.</td></tr>
       <tr><td>Dịch vụ đang giới hạn lượt dùng</td><td>Gói miễn phí giới hạn số giờ âm thanh mỗi giờ/ngày. Ứng dụng tự chờ rồi gửi tiếp; nếu vẫn báo, thử lại sau.</td></tr>
     </table>
   </div>
@@ -197,7 +213,7 @@ export default {
     <ul>
       <li><b>Chi phí:</b> miễn phí trong giới hạn. Groq miễn phí hiện cho khoảng vài giờ âm thanh mỗi ngày (xem con số chính xác ở <a href="https://console.groq.com/settings/limits" target="_blank" rel="noopener">trang giới hạn của bạn</a>); Cloudflare miễn phí 100.000 lượt gọi mỗi ngày.</li>
       <li><b>Dung lượng mạng:</b> mỗi phút video gửi lên khoảng 2 MB âm thanh (video 20 phút ≈ 40 MB). Nên dùng Wi-Fi.</li>
-      <li><b>Riêng tư:</b> chỉ âm thanh được gửi lên Groq để nghe lời thoại; hình ảnh, việc dịch và lồng chữ vẫn làm trên máy của bạn. Trạm không lưu lại gì.</li>
+      <li><b>Riêng tư:</b> chỉ âm thanh và lời thoại được gửi lên Groq để nghe và dịch; hình ảnh và việc lồng chữ vẫn làm trên máy của bạn. Trạm không lưu lại gì.</li>
       <li>Muốn chạy hoàn toàn trên máy như trước: tắt ô "Dùng AI đám mây" trong ứng dụng.</li>
     </ul>
   </div>

@@ -175,7 +175,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
         </label>
         <button class="btn ghost" id="cloudTest" type="button">Kiểm tra kết nối</button>
         <div class="note" id="cloudMsg"></div>
-        <div class="note">Chưa có trạm? Xem <a href="huong-dan.html" target="_blank" rel="noopener">hướng dẫn cài đặt</a> (miễn phí, khoảng 10 phút, làm một lần). Khi bật, chỉ phần <b>âm thanh</b> của video được gửi lên dịch vụ Groq để nghe lời thoại; việc dịch và lồng chữ vẫn làm trên máy.</div>
+        <div class="note">Chưa có trạm? Xem <a href="huong-dan.html" target="_blank" rel="noopener">hướng dẫn cài đặt</a> (miễn phí, khoảng 10 phút, làm một lần). Khi bật, phần <b>âm thanh</b> và <b>lời thoại</b> được gửi lên dịch vụ Groq để nghe và dịch; hình ảnh và việc lồng chữ vẫn làm trên máy.</div>
       </div>
     </details>
     <button class="btn block" id="go" disabled>Tạo phụ đề</button>
@@ -218,7 +218,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     </details>
   </section>
 
-  <footer>Hình ảnh video luôn được xử lý ngay trên thiết bị của bạn. Chỉ khi bật "AI đám mây", phần âm thanh mới được gửi lên Groq để nghe lời thoại.</footer>
+  <footer>Hình ảnh video luôn được xử lý ngay trên thiết bị của bạn. Chỉ khi bật "AI đám mây", phần âm thanh và lời thoại mới được gửi lên Groq để nghe và dịch.</footer>
 </div>
 
 <!-- ================= WORKER: nhận dạng giọng nói + dịch ================= -->
@@ -576,6 +576,14 @@ function tidy(segs, dur) {
 
 self.onmessage = async (ev) => {
   const { cmd, audio, model, useGPU, lang, lite, target } = ev.data;
+  if (cmd === 'prep') {
+    try {
+      let segs = (ev.data.segs || []).map(s => ({ ...s, src: cleanText(s.src) }))
+        .filter(s => s.src && !JUNK.test(s.src) && /[\p{L}\p{N}]/u.test(s.src));
+      post('result', { segments: tidy(segs, ev.data.duration) });
+    } catch (e) { console.error(e); post('error', { message: e?.message || String(e) }); }
+    return;
+  }
   if (cmd === 'finish') {
     try {
       const segments = await finishCloud(ev.data);
@@ -650,7 +658,7 @@ self.onmessage = async (ev) => {
 
 // Dịch sang ngôn ngữ phụ đề đã chọn (thuộc tính .vi = nội dung phụ đề in lên video), làm sạch, chia câu dài
 async function finishSegments(segs, target) {
-    segs.forEach(s => { if (s.done) s.vi = s.src; });
+    segs.forEach(s => { if (s.done && !s.vi) s.vi = s.src; });
     const todo = segs.filter(s => !s.done);
     if (todo.length) {
       const cfg = MT_MODELS[target];
@@ -705,7 +713,7 @@ async function finishSegments(segs, target) {
 // Lời thoại đã được AI đám mây nghe xong → chỉ còn dịch + làm sạch trên máy
 async function finishCloud(data) {
   const { target, lite, duration } = data;
-  await useLib(lite ? 'v2' : 'v3');
+  if ((data.segs || []).some(s => !s.done)) await useLib(lite ? 'v2' : 'v3');   // chỉ tải AI dịch khi còn câu chưa dịch
   let segs = (data.segs || []).map(s => ({ ...s, src: cleanText(s.src) }))
     .filter(s => s.src && !JUNK.test(s.src) && /[\p{L}\p{N}]/u.test(s.src));
   segs = tidy(segs, duration);
@@ -944,7 +952,7 @@ function refreshCloudUI() {
   $('cloudBadge').classList.toggle('on', ready);
   $('model').disabled = ready;
   $('envNote').textContent = ready
-    ? 'AI đám mây đang bật: phần nghe lời thoại (nặng nhất) chạy trên máy chủ Groq bằng mô hình Whisper large-v3 — nhanh, chính xác và nhẹ cho điện thoại.'
+    ? 'AI đám mây đang bật: phần nghe lời thoại (Whisper large-v3) và phần dịch đều chạy trên máy chủ Groq — điện thoại chỉ còn việc lồng chữ vào video.'
     : baseEnvNote;
 }
 const baseEnvNote = $('envNote').textContent;
@@ -968,8 +976,10 @@ async function testCloud() {
   try {
     const r = await fetch(c.url.replace(/\/+$/, '') + '/', { headers: c.code ? { 'X-Access-Code': c.code } : {} });
     let j = null; try { j = await r.json(); } catch {}
-    if (r.ok && j?.ok) {
-      msg.textContent = '✓ Kết nối tốt! Trạm đã sẵn sàng.'; msg.classList.add('okmsg');
+    if (r.ok && j?.ok && !(j.version >= 2)) {
+      msg.textContent = '⚠ Kết nối được, nhưng trạm đang dùng code cũ (chưa dịch được trên đám mây). Hãy dán lại code trạm mới trong hướng dẫn rồi bấm Deploy.'; msg.classList.add('badmsg');
+    } else if (r.ok && j?.ok) {
+      msg.textContent = '✓ Kết nối tốt! Trạm đã sẵn sàng (nghe + dịch).'; msg.classList.add('okmsg');
       if (!$('cloudOn').checked) { $('cloudOn').checked = true; setCloud({ on: true }); }
     } else {
       msg.textContent = '✗ ' + (j?.error?.message || `Trạm trả lỗi ${r.status}`); msg.classList.add('badmsg');
@@ -1019,7 +1029,6 @@ function encodeWAV(f32, sr = SR) {
 function cloudError(msg) { const e = new Error(msg); e.cloud = true; return e; }
 
 async function cloudCall(blob, task, language, prompt, onWait) {
-  const c = getCloud();
   const fd = new FormData();
   fd.append('file', blob, 'audio.wav');
   fd.append('model', 'whisper-large-v3');
@@ -1030,17 +1039,24 @@ async function cloudCall(blob, task, language, prompt, onWait) {
     if (language) fd.append('language', language);
   }
   if (prompt) fd.append('prompt', prompt);
+  return cloudSend(task, fd, {}, onWait);
+}
+
+// Gửi một yêu cầu qua trạm; tự chờ & gửi lại khi dịch vụ bận / giới hạn lượt dùng
+async function cloudSend(task, body, extraHeaders, onWait) {
+  const c = getCloud();
   const url = c.url.replace(/\/+$/, '') + '/?task=' + task;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  const headers = { ...(c.code ? { 'X-Access-Code': c.code } : {}), ...extraHeaders };
+  for (let attempt = 0; attempt < 8; attempt++) {
     let r;
     try {
-      r = await fetch(url, { method: 'POST', headers: c.code ? { 'X-Access-Code': c.code } : {}, body: fd });
+      r = await fetch(url, { method: 'POST', headers, body });
     } catch (e) {
       if (attempt < 2) { onWait?.(5, 'Mạng chập chờn'); await sleep(5000); continue; }
       throw cloudError('Không gửi được âm thanh tới trạm đám mây. Kiểm tra mạng internet và địa chỉ trạm.');
     }
-    if ((r.status === 429 || r.status >= 500) && attempt < 5) {
-      const wait = Math.min(90, Number(r.headers.get('Retry-After')) || 10 * (attempt + 1));
+    if ((r.status === 429 || r.status >= 500) && attempt < 7) {
+      const wait = Math.min(90, Math.ceil(Number(r.headers.get('Retry-After'))) || 10 * (attempt + 1));
       onWait?.(wait, r.status === 429 ? 'Dịch vụ đang giới hạn lượt dùng' : 'Dịch vụ đang bận');
       await sleep(wait * 1000);
       continue;
@@ -1051,12 +1067,73 @@ async function cloudCall(blob, task, language, prompt, onWait) {
       const m = j?.error?.message || txt.slice(0, 200);
       if (r.status === 401) throw cloudError(/api key/i.test(m) ? 'Mã API Groq trong trạm không đúng (biến GROQ_API_KEY).' : 'Sai mã truy cập — kiểm tra lại ở mục "AI đám mây".');
       if (r.status === 403) throw cloudError('Trạm từ chối trang web này — kiểm tra biến ALLOWED_ORIGIN trong Cloudflare.');
-      throw cloudError(`Lỗi từ AI đám mây (${r.status}): ${m}`);
+      const e = cloudError(`Lỗi từ AI đám mây (${r.status}): ${m}`); e.status = r.status; throw e;
     }
     if (!j) throw cloudError('Trạm trả về dữ liệu không đọc được.');
     return j;
   }
   throw cloudError('Dịch vụ đám mây đang quá tải. Hãy thử lại sau vài phút.');
+}
+
+// =============== DỊCH PHỤ ĐỀ BẰNG AI ĐÁM MÂY (Groq) ===============
+const LANG_EN = { vi:'Vietnamese', en:'English', zh:'Simplified Chinese', fr:'French', de:'German', es:'Spanish', ru:'Russian', it:'Italian', id:'Indonesian', ar:'Arabic', hi:'Hindi', ja:'Japanese', ko:'Korean', th:'Thai' };
+const CHAT_MODELS = ['openai/gpt-oss-120b', 'llama-3.3-70b-versatile'];
+let chatModelIdx = 0;
+function parseJSONObject(txt) {
+  if (!txt) return null;
+  try { return JSON.parse(txt); } catch {}
+  const a = txt.indexOf('{'), b = txt.lastIndexOf('}');
+  if (a >= 0 && b > a) { try { return JSON.parse(txt.slice(a, b + 1)); } catch {} }
+  return null;
+}
+async function cloudChatTranslate(lines, langName, context, onWait) {
+  const sys = `You are a professional subtitle translator. Translate every subtitle line into ${langName}.
+The lines are consecutive dialogue from one video; they may be in English or in other languages — translate all of them into ${langName}.
+Rules: keep the meaning, names and numbers; use natural, concise spoken style suitable for subtitles; translate each line separately (do not merge, split, skip or reorder lines); never repeat words; no notes or explanations.
+Return ONLY a JSON object that maps each line id to its translation, for example {"1":"...","2":"..."}.`;
+  const user = (context ? `Previous lines (context only, do not translate): ${context}\n\n` : '') +
+    'Lines to translate:\n' + JSON.stringify(Object.fromEntries(lines.map((t, i) => [String(i + 1), t])));
+  for (; chatModelIdx < CHAT_MODELS.length; chatModelIdx++) {
+    const model = CHAT_MODELS[chatModelIdx];
+    const body = { model, temperature: 0.2, max_completion_tokens: 4096, response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: user }] };
+    if (model.startsWith('openai/gpt-oss')) body.reasoning_effort = 'low';
+    let j;
+    try {
+      j = await cloudSend('chat', JSON.stringify(body), { 'Content-Type': 'application/json' }, onWait);
+    } catch (e) {
+      if (e.status === 400 || e.status === 404) {
+        if (/file|multipart|content.?type/i.test(e.message)) throw cloudError('Trạm Cloudflare đang dùng code cũ nên chưa dịch được. Hãy dán lại code trạm mới (xem hướng dẫn), rồi thử lại.');
+        console.warn('Mô hình dịch lỗi, thử mô hình khác:', model, e.message); continue;
+      }
+      throw e;
+    }
+    if (!j?.choices) throw cloudError('Trạm Cloudflare đang dùng code cũ nên chưa dịch được. Hãy dán lại code trạm mới (xem hướng dẫn), rồi thử lại.');
+    const obj = parseJSONObject(j.choices[0]?.message?.content || '');
+    if (!obj) throw cloudError('AI đám mây trả bản dịch không đúng định dạng.');
+    return lines.map((_, i) => (typeof obj[String(i + 1)] === 'string' ? obj[String(i + 1)].trim() : ''));
+  }
+  throw cloudError('AI đám mây chưa dịch được. Nếu bạn chưa cập nhật, hãy dán lại code trạm mới (xem hướng dẫn) rồi thử lại.');
+}
+// Dịch các câu chưa dịch: gán s.vi và đánh dấu done (câu nào AI bỏ sót thì giữ câu gốc)
+async function cloudTranslate(segs, target, onProg, onWait) {
+  const langName = LANG_EN[target] || target;
+  const B = 30;
+  let context = '';
+  for (let i = 0; i < segs.length; i += B) {
+    const batch = segs.slice(i, i + B);
+    let outs;
+    try { outs = await cloudChatTranslate(batch.map(s => s.src), langName, context, onWait); }
+    catch (e) {
+      if (batch.length > 8 && /định dạng/.test(e.message)) {   // lỗi định dạng → chia nhỏ rồi dịch lại
+        outs = [];
+        for (let k = 0; k < batch.length; k += 8) outs.push(...await cloudChatTranslate(batch.slice(k, k + 8).map(s => s.src), langName, context, onWait));
+      } else throw e;
+    }
+    batch.forEach((s, k) => { s.vi = outs[k] || s.src; s.done = true; });
+    context = batch.slice(-3).map(s => s.src).join(' ').slice(-300);
+    onProg(Math.min(1, (i + B) / segs.length));
+  }
 }
 
 const WHISPER_NAMES = { english:'en', vietnamese:'vi', russian:'ru', ukrainian:'uk', chinese:'zh', japanese:'ja', korean:'ko', french:'fr', german:'de', spanish:'es', thai:'th', indonesian:'id', arabic:'ar', hindi:'hi', italian:'it', portuguese:'pt', dutch:'nl', turkish:'tr', polish:'pl', malay:'ms', khmer:'km', lao:'lo', tagalog:'tl', cantonese:'yue' };
@@ -1153,9 +1230,18 @@ $('go').addEventListener('click', async () => {
         },
         (wait, why) => { $('sub').textContent = `${why} — chờ ${wait} giây rồi gửi tiếp…`; });
       if (!c.segs.length) throw cloudError('Không nghe thấy lời thoại nào trong video.');
-      $('stage').textContent = 'AI đám mây đã nghe xong — đang dịch trên máy…'; $('sub').textContent = '';
-      result = await runWorker({ cmd: 'finish', segs: c.segs, target: $('target').value, lite: isIOS, duration, lang: c.lang, langs: c.langs });
-      usedLabel = 'AI đám mây (Whisper large-v3)';
+      const segs = (await runWorker({ cmd: 'prep', segs: c.segs, duration })).segments;
+      if (!segs.length) throw cloudError('Không nghe thấy lời thoại nào trong video.');
+      const todo = segs.filter(s => !s.done);
+      if (todo.length) {
+        const t2 = performance.now();
+        $('stage').textContent = `AI đám mây đang dịch sang ${TARGET_NAMES[$('target').value]}…`; setBar('bar', 0);
+        await cloudTranslate(todo, $('target').value,
+          (p) => { setBar('bar', p); const el = (performance.now() - t2) / 1000; $('sub').textContent = `${Math.round(p * 100)}%` + (p > 0.05 && p < 1 ? ` · còn khoảng ${fmtDur(el / p - el)}` : ''); },
+          (wait, why) => { $('sub').textContent = `${why} — chờ ${wait} giây rồi dịch tiếp…`; });
+      }
+      result = await runWorker({ cmd: 'finish', segs, target: $('target').value, lite: isIOS, duration, lang: c.lang, langs: c.langs });
+      usedLabel = 'AI đám mây (nghe + dịch)';
     }
     while (!result) {
       $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
