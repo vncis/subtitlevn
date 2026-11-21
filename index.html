@@ -818,31 +818,67 @@ async function init() {
   try { return await ready; } catch (e) { ready = null; throw e; }
 }
 
-// Văn bản → mã âm vị (dùng lại một bộ tách âm; lỗi thì tạo lại)
+// Văn bản → âm vị → mã số THEO BẢNG CỦA CHÍNH MÔ HÌNH (phoneme_id_map trong file cấu hình).
+// Mô hình VIVOS đời cũ chỉ có 130 ký hiệu, còn bộ tách âm đánh số theo bảng mặc định mới
+// → phải tự tra bảng, nếu không sẽ lỗi "indices element out of data bounds".
 let sink = null;
 async function makePhonemizer() {
   return self.createPiperPhonemize({
-    print: (line) => { try { const j = JSON.parse(line); if (j.phoneme_ids && sink) sink.push(...j.phoneme_ids); } catch {} },
+    print: (line) => { try { const j = JSON.parse(line); if (sink) sink.push(j); } catch {} },
     printErr: () => {},
     locateFile: (f) => f.endsWith('.wasm') ? piperBase + 'piper_phonemize.wasm' : f.endsWith('.data') ? piperBase + 'piper_phonemize.data' : f,
   });
 }
+// Danh sách âm vị (mỗi phần tử 1 ký tự Unicode) từ kết quả bộ tách âm, dạng nào cũng nhận
+function phonemeList(j) {
+  const raw = j.phonemes ?? j.phoneme ?? null;
+  if (raw == null) return null;
+  const out = [];
+  const add = (x) => {
+    if (Array.isArray(x)) { x.forEach(add); return; }
+    if (typeof x === 'number') { out.push(String.fromCodePoint(x)); return; }
+    if (typeof x === 'string') for (const ch of x.normalize('NFD')) out.push(ch);
+  };
+  add(raw);
+  return out;
+}
+function idsFromPhonemes(phs) {
+  const map = conf.phoneme_id_map, get = (k) => map[k] || [];
+  const ids = [...get('^'), ...get('_')];
+  for (const p of phs) {
+    if (!(p in map)) { stats.missing++; continue; }
+    ids.push(...map[p], ...get('_'));
+  }
+  ids.push(...get('$'));
+  return ids;
+}
+const stats = { missing: 0, fallback: 0 };
+// Trả về danh sách câu, mỗi câu là một dãy mã số
 async function phonemize(text) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       phonemizer ||= await makePhonemizer();
       sink = [];
       phonemizer.callMain(['-l', conf.espeak?.voice || 'vi', '--input', JSON.stringify([{ text }]), '--espeak_data', '/espeak-ng-data']);
-      const ids = sink; sink = null;
-      if (ids.length) return ids;
+      const lines = sink; sink = null;
+      const maxId = (conf.num_symbols || 256) - 1;
+      const sents = [];
+      for (const j of lines) {
+        const phs = phonemeList(j);
+        if (phs && phs.length) sents.push(idsFromPhonemes(phs));
+        else if (Array.isArray(j.phoneme_ids)) {           // không có âm vị dạng chữ → bỏ mã vượt bảng
+          stats.fallback++;
+          sents.push(j.phoneme_ids.flat(Infinity).filter(x => x >= 0 && x <= maxId));
+        }
+      }
+      const good = sents.filter(s => s.length > 3);
+      if (good.length) return good;
       throw new Error('không ra âm vị');
     } catch (e) { phonemizer = null; if (attempt) throw e; }
   }
 }
 
-async function synth(text, sid, lengthScale) {
-  await init();
-  const ids = await phonemize(text);
+async function synthIds(ids, sid, lengthScale) {
   const big = (arr) => BigInt64Array.from(arr.map(x => BigInt(x)));
   const inf = conf.inference || {};
   const feeds = {
@@ -852,7 +888,16 @@ async function synth(text, sid, lengthScale) {
   };
   if ((conf.num_speakers || 1) > 1) feeds.sid = new ort.Tensor('int64', big([sid || 0]), [1]);
   const out = await session.run(feeds);
-  const pcm = Float32Array.from(out[session.outputNames[0]].data);
+  return out[session.outputNames[0]].data;
+}
+async function synth(text, sid, lengthScale) {
+  await init();
+  const sents = await phonemize(text);
+  const sr = conf.audio?.sample_rate || 16000, gap = Math.round(sr * 0.12);
+  const parts = [];
+  for (const ids of sents) parts.push(await synthIds(ids, sid, lengthScale));   // mỗi câu đọc riêng rồi nối lại
+  const pcm = new Float32Array(parts.reduce((n, p) => n + p.length, 0) + gap * (parts.length - 1));
+  { let o = 0; parts.forEach((p, i) => { pcm.set(p, o); o += p.length + (i < parts.length - 1 ? gap : 0); }); }
   // chuẩn hoá âm lượng, cắt bớt khoảng lặng hai đầu
   let peak = 0; for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
   const g = peak > 0 ? Math.min(4, 0.85 / peak) : 1;
@@ -914,7 +959,7 @@ self.onmessage = async (ev) => {
           const pcm = await synth(SCAN_TEXT, sid, 1);
           ok++;
           let peak = 0; for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
-          if (!info) info = `${(pcm.length / sr).toFixed(1)} giây, âm lượng ${peak.toFixed(2)}`;
+          if (!info) info = `${(pcm.length / sr).toFixed(1)} giây, âm lượng ${peak.toFixed(2)}, âm vị thiếu ${stats.missing}, dự phòng ${stats.fallback}`;
           const f0 = pitchOf(pcm, sr);
           res.push({ sid, f0: f0 ? Math.round(f0) : null });
         } catch (e) { fails++; firstErr ||= (e?.message || String(e)); console.warn('scan', sid, e); }
