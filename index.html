@@ -767,22 +767,14 @@ const post = (type, data = {}) => self.postMessage({ type, ...data });
 
 let session = null, conf = null, piperBase = null, phonemizer = null, ready = null;
 
+// Tải file (dùng bộ nhớ đệm HTTP của trình duyệt, không tạo thêm bản sao trong bộ nhớ)
 async function cachedFetch(url, label) {
-  let cache = null;
-  try { cache = await caches.open(CACHE); const hit = await cache.match(url); if (hit) return await hit.arrayBuffer(); } catch {}
-  const r = await fetch(url);
+  post('dl', { label, loaded: 0, total: 0 });
+  const r = await fetch(url, { cache: 'force-cache' });
   if (!r.ok) throw new Error(`Không tải được ${label} (${r.status})`);
-  const total = Number(r.headers.get('Content-Length')) || 0;
-  const reader = r.body.getReader(); const parts = []; let got = 0;
-  for (;;) {
-    const { done, value } = await reader.read(); if (done) break;
-    parts.push(value); got += value.length;
-    post('dl', { label, loaded: got, total });
-  }
-  const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
-  try { await cache?.put(url, new Response(buf.slice(), { headers: { 'Content-Type': 'application/octet-stream' } })); } catch {}
-  return buf.buffer;
+  return r.arrayBuffer();
 }
+const stage = (s) => post('stage', { stage: s });
 
 async function loadScriptText(url) {
   const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -793,10 +785,12 @@ async function init() {
   if (ready) return ready;
   ready = (async () => {
     // 1) ONNX Runtime (chạy mô hình)
+    stage('tải bộ chạy mô hình');
     importScripts(ORT_BASE + 'ort.min.js');
     ort.env.wasm.wasmPaths = ORT_BASE;
     ort.env.wasm.numThreads = 1;
     // 2) Bộ tách âm vị tiếng Việt (espeak-ng biên dịch sang WebAssembly)
+    stage('tải bộ tách âm tiếng Việt');
     let err;
     for (const base of PIPER_BASES) {
       try {
@@ -809,9 +803,16 @@ async function init() {
     }
     if (!piperBase) throw new Error('Không tải được bộ tách âm tiếng Việt: ' + (err?.message || err));
     // 3) Mô hình giọng đọc
+    stage('tải mô hình giọng đọc');
     conf = JSON.parse(new TextDecoder().decode(await cachedFetch(MODEL_URL + '.json', 'cấu hình giọng đọc')));
-    const model = await cachedFetch(MODEL_URL, 'mô hình giọng đọc');
-    session = await ort.InferenceSession.create(new Uint8Array(model), { executionProviders: ['wasm'] });
+    let model = await cachedFetch(MODEL_URL, 'mô hình giọng đọc (~28 MB)');
+    stage('khởi động mô hình giọng đọc');
+    session = await ort.InferenceSession.create(new Uint8Array(model), {
+      executionProviders: ['wasm'], graphOptimizationLevel: 'basic', enableCpuMemArena: false, enableMemPattern: false,
+    });
+    model = null;
+    stage('tách âm thử');
+    await phonemize('xin chào');
     post('ready', { speakers: conf.num_speakers || 1, sampleRate: conf.audio?.sample_rate || 16000 });
   })();
   try { return await ready; } catch (e) { ready = null; throw e; }
@@ -905,7 +906,9 @@ self.onmessage = async (ev) => {
     } else if (cmd === 'scan') {
       await init();
       const n = conf.num_speakers || 1, sr = conf.audio?.sample_rate || 16000, res = [];
-      for (let sid = 0; sid < n; sid++) {
+      const step = ev.data.step || 1;                 // điện thoại: nghe thử ít giọng hơn
+      for (let sid = 0; sid < n; sid += step) {
+        stage(`nghe thử giọng ${sid + 1}/${n}`);
         try { const f0 = pitchOf(await synth(SCAN_TEXT, sid, 1), sr); if (f0) res.push({ sid, f0: Math.round(f0) }); } catch {}
         post('progress', { value: (sid + 1) / n });
       }
@@ -1406,11 +1409,12 @@ async function cloudTranscribe(audio, target, langSel, onProg, onWait) {
 
 // =============== LỒNG TIẾNG – BỘ ĐỌC TIẾNG VIỆT CHẠY TRÊN MÁY (Piper) ===============
 const DUB_KEY = 'phudeviet_dub_v2';
+const TTS_MARK = 'phudeviet_tts_running';   // đang chạy bộ đọc ở bước nào (để biết nếu trang bị sập)
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const SAMPLE_VI = 'Xin chào, đây là giọng đọc sẽ lồng tiếng cho video của bạn.';
 function getDub() {
   let d = {}; try { d = JSON.parse(localStorage.getItem(DUB_KEY) || '{}'); } catch {}
-  return { on: !!d.on, sid: d.sid ?? null, bg: d.bg ?? '0', voices: Array.isArray(d.voices) ? d.voices : null };
+  return { ...d, on: !!d.on, sid: d.sid ?? null, bg: d.bg ?? '0', voices: Array.isArray(d.voices) ? d.voices : null };
 }
 function setDub(p) { try { localStorage.setItem(DUB_KEY, JSON.stringify({ ...getDub(), ...p })); } catch {} }
 function dubLang() {
@@ -1429,10 +1433,12 @@ function getTTS() {
   ttsW = new Worker(URL.createObjectURL(new Blob([$('ttsWorkerSrc').textContent], { type: 'text/javascript' })));
   ttsW.onmessage = (ev) => {
     const m = ev.data;
-    if (m.type === 'dl') state.ttsDl?.(m);
+    if (m.type === 'stage') { try { localStorage.setItem(TTS_MARK, JSON.stringify({ stage: m.stage, t: Date.now() })); } catch {} }
+    else if (m.type === 'dl') state.ttsDl?.(m);
     else if (m.type === 'progress') state.ttsProg?.(m.value);
     else if (m.type === 'done' || m.type === 'error') {
       const w = ttsWait.get(m.id); if (!w) return; ttsWait.delete(m.id);
+      if (m.type === 'error') clearTTSMark();
       m.type === 'done' ? w.res(m) : w.rej(new Error(m.message));
     }
   };
@@ -1440,6 +1446,7 @@ function getTTS() {
   return ttsW;
 }
 function ttsCall(msg) { return new Promise((res, rej) => { const id = ++ttsSeq; ttsWait.set(id, { res, rej }); getTTS().postMessage({ ...msg, id }); }); }
+function clearTTSMark() { try { localStorage.removeItem(TTS_MARK); } catch {} }
 function stopTTS() { try { ttsW?.terminate(); } catch {} ttsW = null; ttsWait.clear(); }
 async function ttsSynth(text, sid, lengthScale = 1) {
   const m = await ttsCall({ cmd: 'synth', text, sid, lengthScale });
@@ -1478,10 +1485,11 @@ async function scanVoices(main = false) {
   if (state.scanning) return false;
   state.scanning = true; $('dubScan').disabled = true; $('dubTry').disabled = true;
   $('dubMsg').className = 'note'; $('dubMsg').textContent = 'Đang chuẩn bị bộ đọc…';
-  dubProgress('Đang nghe thử 65 giọng để tìm giọng nam trầm…', main);
+  dubProgress(`Đang nghe thử ${isMobile ? 22 : 65} giọng để tìm giọng nam trầm…`, main);
   let ok = false;
   try {
-    const m = await ttsCall({ cmd: 'scan' });
+    const m = await ttsCall({ cmd: 'scan', step: isMobile ? 3 : 1 });
+    clearTTSMark();
     const male = m.voices.filter(v => v.f0 >= 70 && v.f0 <= 165).sort((x, y) => x.f0 - y.f0);
     const pick = (male.length ? male : [...m.voices].sort((x, y) => x.f0 - y.f0)).slice(0, 6);
     if (!pick.length) throw new Error('Không tìm được giọng phù hợp.');
@@ -1502,7 +1510,11 @@ async function scanVoices(main = false) {
 $('dubOn').onchange = () => {
   setDub({ on: $('dubOn').checked });
   refreshDubUI();
-  if ($('dubOn').checked && !getDub().voices?.length) scanVoices();
+  if ($('dubOn').checked && !getDub().voices?.length) {
+    if (isIOS && (getDub().crashes || 0) >= 2) {
+      $('dubMsg').textContent = '⚠ Bộ đọc đã làm sập trang ' + getDub().crashes + ' lần trên iPhone này. Bấm "Chuẩn bị giọng đọc" nếu vẫn muốn thử lại.'; $('dubMsg').className = 'note badmsg';
+    } else scanVoices();
+  }
 };
 $('dubScan').onclick = () => scanVoices();
 $('dubVoice').onchange = () => setDub({ sid: Number($('dubVoice').value) });
@@ -1514,13 +1526,26 @@ $('dubTry').onclick = async () => {
   dubProgress('Đang chuẩn bị');
   try {
     const { pcm, sr } = await ttsSynth(SAMPLE_VI, getDub().sid ?? 0);
+    clearTTSMark();
     a.src = URL.createObjectURL(encodeWAV(pcm, sr));
     await a.play();
     $('dubMsg').textContent = '';
   } catch (e) { $('dubMsg').textContent = '✗ ' + (e.message || e); $('dubMsg').className = 'note badmsg'; }
   finally { btn.disabled = false; btn.textContent = '▶ Nghe thử giọng'; show('dubBar', false); state.ttsDl = state.ttsProg = null; }
 };
+(function checkTTSCrash() {
+  let mk = null; try { mk = JSON.parse(localStorage.getItem(TTS_MARK) || 'null'); } catch {}
+  if (!mk) return;
+  clearTTSMark();
+  if (Date.now() - (mk.t || 0) > 30 * 60 * 1000) return;
+  const n = (getDub().crashes || 0) + 1;
+  setDub({ on: false, crashes: n, crashStage: mk.stage });
+  state.ttsCrash = `⚠ Lần trước trình duyệt bị sập khi chuẩn bị giọng đọc (đang ở bước: ${mk.stage}). ` +
+    (isIOS ? 'Có thể iPhone không đủ bộ nhớ để chạy bộ đọc ngay trên máy. Lồng tiếng đã được tắt để trang không bị sập lại; ' + (n >= 2 ? 'nên dùng máy tính để lồng tiếng.' : 'bạn có thể thử lại một lần nữa (đóng bớt ứng dụng khác trước).')
+           : 'Lồng tiếng đã được tắt để trang không bị sập lại; bạn có thể thử lại.');
+})();
 refreshDubUI();
+if (state.ttsCrash) { $('dubMsg').textContent = state.ttsCrash; $('dubMsg').className = 'note badmsg'; }
 
 // Tạo giọng đọc cho từng câu; câu đọc dài hơn khoảng trống thì đọc nhanh hơn cho vừa
 async function buildDub(segs, onProg, onDl) {
@@ -1551,6 +1576,7 @@ async function buildDub(segs, onProg, onDl) {
       onProg((k + 1) / items.length);
     }
   } finally { state.ttsDl = null; }
+  clearTTSMark();
   let prevEnd = 0;
   return items.map(it => { const at = Math.max(it.start, prevEnd + 0.04); prevEnd = at + it.dur; return { at, dur: it.dur, blob: it.blob }; });
 }
