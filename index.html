@@ -936,6 +936,13 @@ async function loadMB() {
 const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.userAgent));
 const hasGPU = !!navigator.gpu;
+// Điện thoại: chỉ khai báo "video/*" để iPhone/Android hiện cả Thư viện ảnh, Chụp video và Tệp
+// (nếu có thêm đuôi .mkv/.webm…, iPhone chỉ mở mục Tệp)
+if (isMobile) {
+  $('file').setAttribute('accept', 'video/*');
+  const hint = document.querySelector('#drop small');
+  if (hint) hint.textContent = 'từ Thư viện ảnh, Tệp hoặc quay video mới';
+}
 $('model').value = isIOS ? 'onnx-community/whisper-tiny'
   : (!isMobile && hasGPU) ? 'onnx-community/whisper-small' : 'onnx-community/whisper-base';
 $('envNote').textContent = isIOS
