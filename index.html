@@ -1584,12 +1584,16 @@ $('go').addEventListener('click', async () => {
     finally { $('go').disabled = false; keepAwake(false); dropRealtime(prep); }
     return;
   }
+  state.tm = [];   // thời gian từng bước, hiện ở cuối
+  const mark = (label, since) => state.tm.push([label, (performance.now() - since) / 1000]);
   try {
     let result = null, usedLabel = null;
     if (cloudReady()) {
       $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
       setBar('bar', 0);
+      const t0a = performance.now();
       const audio = await extractAudio(state.file, (p) => setBar('bar', p));
+      mark('tách âm thanh (máy)', t0a);
       const duration = audio.length / SR;
       $('stage').textContent = 'Đang gửi âm thanh lên AI đám mây để nghe lời thoại…';
       setBar('bar', 0);
@@ -1601,6 +1605,7 @@ $('go').addEventListener('click', async () => {
           $('sub').textContent = `Phần ${k}/${n} · ${Math.round(p * 100)}%` + (p > 0.05 ? ` · còn khoảng ${fmtDur(el / p - el)}` : '');
         },
         (wait, why) => { $('sub').textContent = `${why} — chờ ${wait} giây rồi gửi tiếp…`; });
+      mark('nghe lời thoại (đám mây)', t1);
       if (!c.segs.length) throw cloudError('Không nghe thấy lời thoại nào trong video.');
       const segs = (await runWorker({ cmd: 'prep', segs: c.segs, duration })).segments;
       if (!segs.length) throw cloudError('Không nghe thấy lời thoại nào trong video.');
@@ -1611,10 +1616,12 @@ $('go').addEventListener('click', async () => {
         await cloudTranslate(todo, $('target').value,
           (p) => { setBar('bar', p); const el = (performance.now() - t2) / 1000; $('sub').textContent = `${Math.round(p * 100)}%` + (p > 0.05 && p < 1 ? ` · còn khoảng ${fmtDur(el / p - el)}` : ''); },
           (wait, why) => { $('sub').textContent = `${why} — chờ ${wait} giây rồi dịch tiếp…`; });
+        mark('dịch (đám mây)', t2);
       }
       result = await runWorker({ cmd: 'finish', segs, target: $('target').value, lite: isIOS, duration, lang: c.lang, langs: c.langs });
       usedLabel = 'AI đám mây (nghe + dịch)';
     }
+    const tLocal = performance.now();
     while (!result) {
       $('stage').textContent = 'Đang tách âm thanh từ video…'; $('sub').textContent = '';
       setBar('bar', 0);
@@ -1633,6 +1640,7 @@ $('go').addEventListener('click', async () => {
         await new Promise(r => setTimeout(r, 800));   // cho trình duyệt kịp giải phóng bộ nhớ
       }
     }
+    if (!usedLabel) mark('nghe + dịch (trên máy)', tLocal);
     state.segments = result.segments;
     state.lang = result.lang;
     state.subLang = result.target;
@@ -2049,6 +2057,7 @@ async function doBurn(fromTap, prepIn = null) {
         (p) => { setBar('bar', p); const el = (performance.now() - t1) / 1000; $('sub').textContent = `${Math.round(p * 100)}%` + (p > 0.05 && p < 1 ? ` · còn khoảng ${fmtDur(el / p - el)}` : ''); },
         (m) => { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `Đang tải ${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; });
       stopTTS();   // giải phóng bộ nhớ của bộ đọc trước khi ghi video
+      (state.tm ||= []).push(['tạo giọng đọc (máy)', (performance.now() - t1) / 1000]);
       dub = { clips, bg: getDub().bg };
     }
     try {
@@ -2080,7 +2089,12 @@ async function doBurn(fromTap, prepIn = null) {
     $('dl').href = state.outUrl; $('dl').download = name;
     $('outVideo').src = state.outUrl;
     $('stage').textContent = `Xong! Video đã có phụ đề ${subName()}` + (dubOn ? ' và giọng đọc lồng tiếng.' : '.');
-    $('sub').textContent = `${fmtMB(blob.size)} · chất lượng ${qLabel} · lồng trong ${fmtDur((performance.now() - t0) / 1000)}`;
+    const tm = (state.tm || []).filter(x => !/^tạo giọng|^lồng/.test(x[0]));
+    const dubT = (state.tm || []).find(x => /^tạo giọng/.test(x[0]));
+    const burnSec = (performance.now() - t0) / 1000 - (dubT ? dubT[1] : 0);
+    const steps = [...tm, ...(dubT ? [dubT] : []), [realtimeFirst ? 'lồng chữ (máy, phát & ghi)' : 'lồng chữ (máy, nhanh)', burnSec]];
+    $('sub').innerHTML = `${fmtMB(blob.size)} · chất lượng ${qLabel}<br>Thời gian: ` + steps.map(([l, s]) => `${l} <b>${fmtDur(s)}</b>`).join(' · ');
+    state.tm = [];
     setBar('bar', 1);
     show('step3'); show('outBox');
     show('share', false);
