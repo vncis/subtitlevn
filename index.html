@@ -171,7 +171,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
     <div class="note hidden" id="targetNote"></div>
 
     <div class="dub" id="dubBox">
-      <label class="chk"><input type="checkbox" id="dubOn"> <span><b>Lồng tiếng Việt</b>: tắt tiếng gốc và đọc lời phụ đề bằng giọng nam</span></label>
+      <label class="chk"><input type="checkbox" id="dubOn"> <span><b>Lồng tiếng Việt</b>: tắt tiếng gốc và đọc lời phụ đề bằng giọng tiếng Việt</span></label>
       <div class="dubBody hidden" id="dubBody">
         <div class="grid" style="margin-top:0">
           <label class="f">Giọng đọc <select id="dubVoice"></select></label>
@@ -184,10 +184,10 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
         </div>
         <div class="row" style="margin-top:0">
           <button class="btn ghost" id="dubTry" type="button">▶ Nghe thử giọng</button>
-          <button class="btn ghost" id="dubScan" type="button">Tìm lại giọng nam trầm</button>
+          <button class="btn ghost hidden" id="dubScan" type="button">Dò giọng nam</button>
         </div>
         <div class="bar hidden" id="dubBar"><i></i></div>
-        <div class="note">Giọng đọc chạy ngay trên máy bạn (mô hình mở Piper, không gửi chữ đi đâu). Lần đầu tải khoảng 45 MB. Bước ghép cuối mất bằng thời lượng video.</div>
+        <div class="note">Giọng đọc chạy ngay trên máy bạn (mô hình mở Piper, không gửi chữ đi đâu). Lần đầu tải khoảng 80 MB (giọng nữ). Bấm "Nghe thử giọng" để nghe trước. Bước ghép cuối mất bằng thời lượng video.</div>
       </div>
       <div class="note" id="dubMsg"></div>
     </div>
@@ -761,11 +761,15 @@ const PIPER_BASES = [
   'https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/',
   'https://unpkg.com/@diffusionstudio/piper-wasm@1.0.0/build/',
 ];
-const MODEL_URL = 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/vi/vi_VN/vivos/x_low/vi_VN-vivos-x_low.onnx';
+// Các giọng tiếng Việt của Piper (giấy phép mở)
+const MODELS = {
+  vais1000: { url: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/vi/vi_VN/vais1000/medium/vi_VN-vais1000-medium.onnx', label: 'giọng nữ VAIS1000 (~63 MB)' },
+  vivos:    { url: 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/vi/vi_VN/vivos/x_low/vi_VN-vivos-x_low.onnx', label: 'giọng nam VIVOS (~28 MB)' },
+};
 const CACHE = 'phudeviet-tts-v1';
 const post = (type, data = {}) => self.postMessage({ type, ...data });
 
-let session = null, conf = null, piperBase = null, phonemizer = null, ready = null;
+let session = null, conf = null, piperBase = null, phonemizer = null, ready = null, curModel = null, engineReady = null;
 
 // Tải file (dùng bộ nhớ đệm HTTP của trình duyệt, không tạo thêm bản sao trong bộ nhớ)
 async function cachedFetch(url, label) {
@@ -781,15 +785,14 @@ async function loadScriptText(url) {
   return r.text();
 }
 
-async function init() {
-  if (ready) return ready;
-  ready = (async () => {
-    // 1) ONNX Runtime (chạy mô hình)
+// Bộ chạy mô hình + bộ tách âm (dùng chung cho mọi giọng)
+async function initEngine() {
+  if (engineReady) return engineReady;
+  engineReady = (async () => {
     stage('tải bộ chạy mô hình');
     importScripts(ORT_BASE + 'ort.min.js');
     ort.env.wasm.wasmPaths = ORT_BASE;
     ort.env.wasm.numThreads = 1;
-    // 2) Bộ tách âm vị tiếng Việt (espeak-ng biên dịch sang WebAssembly)
     stage('tải bộ tách âm tiếng Việt');
     let err;
     for (const base of PIPER_BASES) {
@@ -802,20 +805,31 @@ async function init() {
       } catch (e) { err = e; console.warn('piper base fail', base, e); }
     }
     if (!piperBase) throw new Error('Không tải được bộ tách âm tiếng Việt: ' + (err?.message || err));
-    // 3) Mô hình giọng đọc
-    stage('tải mô hình giọng đọc');
-    conf = JSON.parse(new TextDecoder().decode(await cachedFetch(MODEL_URL + '.json', 'cấu hình giọng đọc')));
-    let model = await cachedFetch(MODEL_URL, 'mô hình giọng đọc (~28 MB)');
-    stage('khởi động mô hình giọng đọc');
-    session = await ort.InferenceSession.create(new Uint8Array(model), {
+  })();
+  try { return await engineReady; } catch (e) { engineReady = null; throw e; }
+}
+// Nạp mô hình giọng (đổi giọng thì giải phóng mô hình cũ)
+async function init(model = 'vais1000') {
+  if (!MODELS[model]) model = 'vais1000';
+  if (ready && curModel === model) return ready;
+  if (session) { try { await session.release?.(); } catch {} session = null; }
+  curModel = model;
+  ready = (async () => {
+    await initEngine();
+    const M = MODELS[model];
+    stage('tải ' + M.label);
+    conf = JSON.parse(new TextDecoder().decode(await cachedFetch(M.url + '.json', 'cấu hình giọng đọc')));
+    let buf = await cachedFetch(M.url, M.label);
+    stage('khởi động ' + M.label);
+    session = await ort.InferenceSession.create(new Uint8Array(buf), {
       executionProviders: ['wasm'], graphOptimizationLevel: 'basic', enableCpuMemArena: false, enableMemPattern: false,
     });
-    model = null;
+    buf = null;
     stage('tách âm thử');
     await phonemize('xin chào');
-    post('ready', { speakers: conf.num_speakers || 1, sampleRate: conf.audio?.sample_rate || 16000 });
+    post('ready', { model, speakers: conf.num_speakers || 1, sampleRate: conf.audio?.sample_rate || 16000 });
   })();
-  try { return await ready; } catch (e) { ready = null; throw e; }
+  try { return await ready; } catch (e) { ready = null; curModel = null; throw e; }
 }
 
 // Văn bản → âm vị → mã số THEO BẢNG CỦA CHÍNH MÔ HÌNH (phoneme_id_map trong file cấu hình).
@@ -890,8 +904,8 @@ async function synthIds(ids, sid, lengthScale) {
   const out = await session.run(feeds);
   return out[session.outputNames[0]].data;
 }
-async function synth(text, sid, lengthScale) {
-  await init();
+async function synth(text, sid, lengthScale, model) {
+  await init(model);
   const sents = await phonemize(text);
   const sr = conf.audio?.sample_rate || 16000, gap = Math.round(sr * 0.12);
   const parts = [];
@@ -944,19 +958,19 @@ const SCAN_TEXT = 'Xin chào các bạn, hôm nay chúng ta cùng xem một câu
 self.onmessage = async (ev) => {
   const { cmd, id } = ev.data;
   try {
-    if (cmd === 'init') { await init(); post('done', { id }); }
+    if (cmd === 'init') { await init(ev.data.model); post('done', { id }); }
     else if (cmd === 'synth') {
-      const pcm = await synth(ev.data.text, ev.data.sid, ev.data.lengthScale);
+      const pcm = await synth(ev.data.text, ev.data.sid, ev.data.lengthScale, ev.data.model);
       post('done', { id, pcm, sr: conf.audio?.sample_rate || 16000 }); 
     } else if (cmd === 'scan') {
-      await init();
+      await init('vivos');
       const n = conf.num_speakers || 1, sr = conf.audio?.sample_rate || 16000, res = [];
       const step = ev.data.step || 1;                 // điện thoại: nghe thử ít giọng hơn
       let ok = 0, fails = 0, firstErr = null, info = null;
       for (let sid = 0; sid < n; sid += step) {
         stage(`nghe thử giọng ${sid + 1}/${n}`);
         try {
-          const pcm = await synth(SCAN_TEXT, sid, 1);
+          const pcm = await synth(SCAN_TEXT, sid, 1, 'vivos');
           ok++;
           let peak = 0; for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
           if (!info) info = `${(pcm.length / sr).toFixed(1)} giây, âm lượng ${peak.toFixed(2)}, âm vị thiếu ${stats.missing}, dự phòng ${stats.fallback}`;
@@ -1476,7 +1490,10 @@ function dubLang() {
   return s;
 }
 const dubRequested = () => getDub().on && dubLang() === 'vi';               // người dùng muốn lồng tiếng
-const dubWanted = () => dubRequested() && getDub().voices?.length > 0;      // ...và giọng đọc đã sẵn sàng
+// Giọng đang chọn: 'vais1000' (nữ, mặc định) hoặc 'vivos' (nam, cần dò giọng trước)
+const dubModel = () => getDub().model === 'vivos' ? 'vivos' : 'vais1000';
+const dubReady = () => dubModel() === 'vais1000' || getDub().voices?.length > 0;
+const dubWanted = () => dubRequested() && dubReady();                          // ...và giọng đọc đã sẵn sàng
 
 // --- Worker bộ đọc ---
 let ttsW = null, ttsSeq = 0;
@@ -1501,29 +1518,31 @@ function getTTS() {
 function ttsCall(msg) { return new Promise((res, rej) => { const id = ++ttsSeq; ttsWait.set(id, { res, rej }); getTTS().postMessage({ ...msg, id }); }); }
 function clearTTSMark() { try { localStorage.removeItem(TTS_MARK); } catch {} }
 function stopTTS() { try { ttsW?.terminate(); } catch {} ttsW = null; ttsWait.clear(); }
-async function ttsSynth(text, sid, lengthScale = 1) {
-  const m = await ttsCall({ cmd: 'synth', text, sid, lengthScale });
+async function ttsSynth(text, sid, lengthScale = 1, model = dubModel()) {
+  const m = await ttsCall({ cmd: 'synth', text, sid, lengthScale, model });
   return { pcm: m.pcm, sr: m.sr };
 }
 
 // --- Giao diện ---
 function voiceLabel(v, i) { return v.f0 ? `Giọng nam ${i + 1}${i === 0 ? ' – trầm nhất' : ''} (≈ ${v.f0} Hz)` : `Giọng số ${v.sid + 1}`; }
 function refreshDubUI() {
-  const d = getDub();
+  const d = getDub(), model = dubModel(), male = d.voices || [];
   $('dubOn').checked = d.on;
-  const has = !!d.voices?.length;
   show('dubBody', d.on);
   const sel = $('dubVoice');
-  sel.innerHTML = has ? d.voices.map((v, i) => `<option value="${v.sid}">${voiceLabel(v, i)}</option>`).join('')
-                      : '<option>Chưa chuẩn bị giọng đọc</option>';
-  sel.disabled = !has;
-  if (has) sel.value = String(d.sid ?? d.voices[0].sid);
-  if (!state.scanning) { $('dubTry').disabled = !has; $('dubScan').textContent = has ? 'Tìm lại giọng nam trầm' : 'Chuẩn bị giọng đọc (tải ~45 MB)'; }
+  sel.innerHTML = '<option value="vais1000">Giọng nữ – rõ ràng, chuẩn (khuyên dùng)</option>' +
+    (male.length ? male.map((v, i) => `<option value="vivos:${v.sid}">${voiceLabel(v, i)} – kém rõ hơn</option>`).join('')
+                 : '<option value="vivos:scan">Giọng nam (cần dò giọng, kém rõ hơn)…</option>');
+  sel.disabled = !!state.scanning;
+  sel.value = model === 'vais1000' ? 'vais1000' : (male.length ? `vivos:${d.sid ?? male[0].sid}` : 'vivos:scan');
+  if (!state.scanning) $('dubTry').disabled = !dubReady();
+  show('dubScan', model === 'vivos');
+  $('dubScan').textContent = male.length ? 'Tìm lại giọng nam' : 'Dò giọng nam (tải ~28 MB)';
   $('dubBg').value = d.bg;
   const msg = $('dubMsg');
   if (state.scanning) {}
-  else if (d.on && !has && /^✗/.test(msg.textContent)) {}   // giữ nguyên thông báo lỗi cụ thể
-  else if (d.on && !has) { msg.textContent = '⚠ Giọng đọc chưa được chuẩn bị. Bấm "Chuẩn bị giọng đọc", hoặc cứ bấm Tạo phụ đề — ứng dụng sẽ tự chuẩn bị trước khi lồng tiếng.'; msg.className = 'note badmsg'; }
+  else if (d.on && !dubReady() && /^✗/.test(msg.textContent)) {}   // giữ nguyên thông báo lỗi cụ thể
+  else if (d.on && !dubReady()) { msg.textContent = '⚠ Giọng nam chưa được dò. Bấm "Dò giọng nam", hoặc chọn giọng nữ.'; msg.className = 'note badmsg'; }
   else if (d.on && dubLang() !== 'vi') { msg.textContent = 'Bộ đọc chỉ đọc tiếng Việt — hãy chọn phụ đề tiếng Việt để lồng tiếng.'; msg.className = 'note badmsg'; }
   else if (!d.on || /^⚠/.test(msg.textContent)) { msg.textContent = ''; msg.className = 'note'; }
   $('go').textContent = goLabel();
@@ -1554,7 +1573,7 @@ async function scanVoices(main = false) {
       pick = m.voices.slice(0, 8);
       note = ` (không đo được độ trầm — ${m.info || ''}; hãy nghe thử từng giọng để chọn giọng nam)`;
     }
-    setDub({ voices: pick, sid: pick[0].sid });
+    setDub({ voices: pick, sid: pick[0].sid, model: 'vivos' });
     $('dubMsg').textContent = `✓ Bộ đọc đã chạy được trên máy. ${male.length ? `Tìm thấy ${pick.length} giọng nam trầm.` : `Có ${pick.length} giọng để chọn.`} Bấm "Nghe thử giọng" để chọn giọng ưng ý.` + note;
     $('dubMsg').className = 'note okmsg';
     ok = true; state.dubIssue = null;
@@ -1572,14 +1591,16 @@ async function scanVoices(main = false) {
 $('dubOn').onchange = () => {
   setDub({ on: $('dubOn').checked });
   refreshDubUI();
-  if ($('dubOn').checked && !getDub().voices?.length) {
-    if (isIOS && (getDub().crashes || 0) >= 2) {
-      $('dubMsg').textContent = '⚠ Bộ đọc đã làm sập trang ' + getDub().crashes + ' lần trên iPhone này. Bấm "Chuẩn bị giọng đọc" nếu vẫn muốn thử lại.'; $('dubMsg').className = 'note badmsg';
-    } else scanVoices();
-  }
 };
 $('dubScan').onclick = () => scanVoices();
-$('dubVoice').onchange = () => setDub({ sid: Number($('dubVoice').value) });
+$('dubVoice').onchange = () => {
+  const v = $('dubVoice').value;
+  $('dubMsg').textContent = ''; $('dubMsg').className = 'note';
+  if (v === 'vais1000') setDub({ model: 'vais1000' });
+  else if (v === 'vivos:scan') { setDub({ model: 'vivos' }); refreshDubUI(); scanVoices(); return; }
+  else setDub({ model: 'vivos', sid: Number(v.split(':')[1]) });
+  refreshDubUI();
+};
 $('dubBg').onchange = () => setDub({ bg: $('dubBg').value });
 $('target').addEventListener('change', refreshDubUI);
 $('dubTry').onclick = async () => {
@@ -1587,7 +1608,7 @@ $('dubTry').onclick = async () => {
   const btn = $('dubTry'); btn.disabled = true; btn.textContent = 'Đang đọc…';
   dubProgress('Đang chuẩn bị');
   try {
-    const { pcm, sr } = await ttsSynth(SAMPLE_VI, getDub().sid ?? 0);
+    const { pcm, sr } = await ttsSynth(SAMPLE_VI, getDub().sid ?? 0);   // giọng đang chọn
     clearTTSMark();
     a.src = URL.createObjectURL(encodeWAV(pcm, sr));
     await a.play();
@@ -1611,7 +1632,7 @@ if (state.ttsCrash) { $('dubMsg').textContent = state.ttsCrash; $('dubMsg').clas
 
 // Tạo giọng đọc cho từng câu; câu đọc dài hơn khoảng trống thì đọc nhanh hơn cho vừa
 async function buildDub(segs, onProg, onDl) {
-  const sid = getDub().sid ?? 0;
+  const sid = getDub().sid ?? 0, model = dubModel();
   const cache = state.dubCache ||= new Map();
   const items = segs.map((s, i) => ({
     text: (s.vi || '').trim(), start: s.start,
@@ -1619,9 +1640,9 @@ async function buildDub(segs, onProg, onDl) {
   })).filter(x => x.text && /[\p{L}\p{N}]/u.test(x.text));
   state.ttsDl = onDl;
   const synth = async (text, ls) => {
-    const key = `${sid}|${ls}|${text}`;
+    const key = `${model}|${sid}|${ls}|${text}`;
     if (cache.has(key)) return cache.get(key);
-    const { pcm, sr } = await ttsSynth(text, sid, ls);
+    const { pcm, sr } = await ttsSynth(text, sid, ls, model);
     const r = { blob: encodeWAV(pcm, sr), dur: pcm.length / sr };
     cache.set(key, r);
     return r;
@@ -2159,11 +2180,11 @@ async function doBurn(fromTap, prepIn = null) {
       const t1 = performance.now();
       try {
         // Chưa có giọng → tự chuẩn bị ngay (lần đầu: tải ~45 MB và dò 65 giọng)
-        if (!getDub().voices?.length) {
-          $('stage').textContent = 'Lồng tiếng: đang chuẩn bị giọng đọc lần đầu (tải ~45 MB, dò giọng nam trầm)…'; setBar('bar', 0, true);
+        if (!dubReady()) {
+          $('stage').textContent = 'Lồng tiếng: đang dò giọng nam (tải ~28 MB)…'; setBar('bar', 0, true);
           if (!await scanVoices(true)) throw new Error(state.dubIssue || 'không chuẩn bị được giọng đọc');
         }
-        $('stage').textContent = 'Lồng tiếng: đang đọc lời phụ đề thành giọng nói (chạy trên máy)…'; setBar('bar', 0);
+        $('stage').textContent = 'Lồng tiếng: đang đọc lời phụ đề thành giọng nói (chạy trên máy; lần đầu tải mô hình giọng)…'; setBar('bar', 0);
         const clips = await buildDub(segs,
           (p) => { setBar('bar', p); const el = (performance.now() - t1) / 1000; $('sub').textContent = `Đã đọc ${Math.round(p * 100)}% số câu` + (p > 0.05 && p < 1 ? ` · còn khoảng ${fmtDur(el / p - el)}` : ''); },
           (m) => { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `Đang tải ${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; });
