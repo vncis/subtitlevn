@@ -907,12 +907,20 @@ self.onmessage = async (ev) => {
       await init();
       const n = conf.num_speakers || 1, sr = conf.audio?.sample_rate || 16000, res = [];
       const step = ev.data.step || 1;                 // điện thoại: nghe thử ít giọng hơn
+      let ok = 0, fails = 0, firstErr = null, info = null;
       for (let sid = 0; sid < n; sid += step) {
         stage(`nghe thử giọng ${sid + 1}/${n}`);
-        try { const f0 = pitchOf(await synth(SCAN_TEXT, sid, 1), sr); if (f0) res.push({ sid, f0: Math.round(f0) }); } catch {}
+        try {
+          const pcm = await synth(SCAN_TEXT, sid, 1);
+          ok++;
+          let peak = 0; for (let i = 0; i < pcm.length; i++) peak = Math.max(peak, Math.abs(pcm[i]));
+          if (!info) info = `${(pcm.length / sr).toFixed(1)} giây, âm lượng ${peak.toFixed(2)}`;
+          const f0 = pitchOf(pcm, sr);
+          res.push({ sid, f0: f0 ? Math.round(f0) : null });
+        } catch (e) { fails++; firstErr ||= (e?.message || String(e)); console.warn('scan', sid, e); }
         post('progress', { value: (sid + 1) / n });
       }
-      post('done', { id, voices: res });
+      post('done', { id, voices: res, ok, fails, firstErr, info });
     }
   } catch (e) { console.error(e); post('error', { id, message: e?.message || String(e) }); }
 };
@@ -1454,7 +1462,7 @@ async function ttsSynth(text, sid, lengthScale = 1) {
 }
 
 // --- Giao diện ---
-function voiceLabel(v, i) { return `Giọng nam ${i + 1}${i === 0 ? ' – trầm nhất' : ''} (≈ ${v.f0} Hz)`; }
+function voiceLabel(v, i) { return v.f0 ? `Giọng nam ${i + 1}${i === 0 ? ' – trầm nhất' : ''} (≈ ${v.f0} Hz)` : `Giọng số ${v.sid + 1}`; }
 function refreshDubUI() {
   const d = getDub();
   $('dubOn').checked = d.on;
@@ -1469,6 +1477,7 @@ function refreshDubUI() {
   $('dubBg').value = d.bg;
   const msg = $('dubMsg');
   if (state.scanning) {}
+  else if (d.on && !has && /^✗/.test(msg.textContent)) {}   // giữ nguyên thông báo lỗi cụ thể
   else if (d.on && !has) { msg.textContent = '⚠ Giọng đọc chưa được chuẩn bị. Bấm "Chuẩn bị giọng đọc", hoặc cứ bấm Tạo phụ đề — ứng dụng sẽ tự chuẩn bị trước khi lồng tiếng.'; msg.className = 'note badmsg'; }
   else if (d.on && dubLang() !== 'vi') { msg.textContent = 'Bộ đọc chỉ đọc tiếng Việt — hãy chọn phụ đề tiếng Việt để lồng tiếng.'; msg.className = 'note badmsg'; }
   else if (!d.on || /^⚠/.test(msg.textContent)) { msg.textContent = ''; msg.className = 'note'; }
@@ -1490,11 +1499,19 @@ async function scanVoices(main = false) {
   try {
     const m = await ttsCall({ cmd: 'scan', step: isMobile ? 3 : 1 });
     clearTTSMark();
-    const male = m.voices.filter(v => v.f0 >= 70 && v.f0 <= 165).sort((x, y) => x.f0 - y.f0);
-    const pick = (male.length ? male : [...m.voices].sort((x, y) => x.f0 - y.f0)).slice(0, 6);
-    if (!pick.length) throw new Error('Không tìm được giọng phù hợp.');
+    console.log('Kết quả dò giọng', m);
+    if (!m.voices.length) throw new Error(`bộ đọc không đọc được câu nào (${m.fails} lần lỗi${m.firstErr ? ': ' + m.firstErr : ''})`);
+    const withF0 = m.voices.filter(v => v.f0);
+    const male = withF0.filter(v => v.f0 >= 70 && v.f0 <= 165).sort((x, y) => x.f0 - y.f0);
+    let pick = (male.length ? male : withF0.sort((x, y) => x.f0 - y.f0)).slice(0, 6);
+    let note = '';
+    if (!pick.length) {   // đọc được nhưng không đo được độ trầm → cho chọn bằng cách nghe thử
+      pick = m.voices.slice(0, 8);
+      note = ` (không đo được độ trầm — ${m.info || ''}; hãy nghe thử từng giọng để chọn giọng nam)`;
+    }
     setDub({ voices: pick, sid: pick[0].sid });
-    $('dubMsg').textContent = `✓ Đã tìm thấy ${pick.length} giọng nam trầm. Bấm "Nghe thử giọng" để chọn giọng ưng ý.`; $('dubMsg').className = 'note okmsg';
+    $('dubMsg').textContent = `✓ Bộ đọc đã chạy được trên máy. ${male.length ? `Tìm thấy ${pick.length} giọng nam trầm.` : `Có ${pick.length} giọng để chọn.`} Bấm "Nghe thử giọng" để chọn giọng ưng ý.` + note;
+    $('dubMsg').className = 'note okmsg';
     ok = true; state.dubIssue = null;
   } catch (e) {
     state.dubIssue = 'không chuẩn bị được giọng đọc (' + (e.message || e) + ')';
