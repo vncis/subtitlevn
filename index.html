@@ -95,6 +95,7 @@ label.chk input{width:20px;height:20px;margin-top:2px;accent-color:var(--accent)
 #liveBox canvas.live{display:block;width:100%;max-height:50vh;object-fit:contain;background:#000;border-radius:12px;margin-top:10px}
 .dub{margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
 .dubBody{display:flex;flex-direction:column;gap:10px}
+.pill.audioPill.on{background:var(--ok);color:#fff}
 #dubBar{margin:0}
 .dubBody .btn{min-height:42px}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
@@ -212,7 +213,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 
   <!-- 2. Tiến trình -->
   <section class="card hidden" id="step2">
-    <h2><span class="num">2</span>Đang xử lý</h2>
+    <h2><span class="num">2</span><span id="step2Title">Đang xử lý</span></h2>
     <div class="stage" id="stage">Chuẩn bị…</div>
     <div class="bar" id="bar"><i></i></div>
     <div class="sub" id="sub"></div>
@@ -1417,7 +1418,8 @@ function dubLang() {
   if (s === 'orig') return (state.langs && state.langs.length === 1) ? state.langs[0] : null;
   return s;
 }
-const dubWanted = () => getDub().on && dubLang() === 'vi' && getDub().voices?.length > 0;
+const dubRequested = () => getDub().on && dubLang() === 'vi';               // người dùng muốn lồng tiếng
+const dubWanted = () => dubRequested() && getDub().voices?.length > 0;      // ...và giọng đọc đã sẵn sàng
 
 // --- Worker bộ đọc ---
 let ttsW = null, ttsSeq = 0;
@@ -1449,27 +1451,35 @@ function voiceLabel(v, i) { return `Giọng nam ${i + 1}${i === 0 ? ' – trầm
 function refreshDubUI() {
   const d = getDub();
   $('dubOn').checked = d.on;
-  show('dubBody', d.on && !!d.voices?.length);
+  const has = !!d.voices?.length;
+  show('dubBody', d.on);
   const sel = $('dubVoice');
-  sel.innerHTML = (d.voices || []).map((v, i) => `<option value="${v.sid}">${voiceLabel(v, i)}</option>`).join('');
-  if (d.voices?.length) sel.value = String(d.sid ?? d.voices[0].sid);
+  sel.innerHTML = has ? d.voices.map((v, i) => `<option value="${v.sid}">${voiceLabel(v, i)}</option>`).join('')
+                      : '<option>Chưa chuẩn bị giọng đọc</option>';
+  sel.disabled = !has;
+  if (has) sel.value = String(d.sid ?? d.voices[0].sid);
+  if (!state.scanning) { $('dubTry').disabled = !has; $('dubScan').textContent = has ? 'Tìm lại giọng nam trầm' : 'Chuẩn bị giọng đọc (tải ~45 MB)'; }
   $('dubBg').value = d.bg;
   const msg = $('dubMsg');
-  if (d.on && d.voices?.length && dubLang() !== 'vi') { msg.textContent = 'Bộ đọc chỉ đọc tiếng Việt — hãy chọn phụ đề tiếng Việt để lồng tiếng.'; msg.classList.add('badmsg'); }
-  else if (!d.on) msg.textContent = '';
+  if (state.scanning) {}
+  else if (d.on && !has) { msg.textContent = '⚠ Giọng đọc chưa được chuẩn bị. Bấm "Chuẩn bị giọng đọc", hoặc cứ bấm Tạo phụ đề — ứng dụng sẽ tự chuẩn bị trước khi lồng tiếng.'; msg.className = 'note badmsg'; }
+  else if (d.on && dubLang() !== 'vi') { msg.textContent = 'Bộ đọc chỉ đọc tiếng Việt — hãy chọn phụ đề tiếng Việt để lồng tiếng.'; msg.className = 'note badmsg'; }
+  else if (!d.on || /^⚠/.test(msg.textContent)) { msg.textContent = ''; msg.className = 'note'; }
   $('go').textContent = goLabel();
 }
-function dubProgress(label) {
+function dubProgress(label, main = false) {
   show('dubBar'); setBar('dubBar', 0, true);
-  state.ttsDl = (m) => { setBar('dubBar', m.total ? m.loaded / m.total : 0, !m.total); $('dubMsg').textContent = `Đang tải ${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; };
-  state.ttsProg = (v) => { setBar('dubBar', v); $('dubMsg').textContent = `${label} ${Math.round(v * 100)}%`; };
+  const out = (txt, v, indet) => { $('dubMsg').textContent = txt; setBar('dubBar', v, indet); if (main) { $('sub').textContent = txt; setBar('bar', v, indet); } };
+  state.ttsDl = (m) => out(`Đang tải ${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`, m.total ? m.loaded / m.total : 0, !m.total);
+  state.ttsProg = (v) => out(`${label} ${Math.round(v * 100)}%`, v, false);
 }
 // Dò cao độ cả 65 người đọc, giữ 6 giọng nam trầm nhất
-async function scanVoices() {
-  if (state.scanning) return;
+async function scanVoices(main = false) {
+  if (state.scanning) return false;
   state.scanning = true; $('dubScan').disabled = true; $('dubTry').disabled = true;
   $('dubMsg').className = 'note'; $('dubMsg').textContent = 'Đang chuẩn bị bộ đọc…';
-  dubProgress('Đang nghe thử 65 giọng để tìm giọng nam trầm…');
+  dubProgress('Đang nghe thử 65 giọng để tìm giọng nam trầm…', main);
+  let ok = false;
   try {
     const m = await ttsCall({ cmd: 'scan' });
     const male = m.voices.filter(v => v.f0 >= 70 && v.f0 <= 165).sort((x, y) => x.f0 - y.f0);
@@ -1477,21 +1487,24 @@ async function scanVoices() {
     if (!pick.length) throw new Error('Không tìm được giọng phù hợp.');
     setDub({ voices: pick, sid: pick[0].sid });
     $('dubMsg').textContent = `✓ Đã tìm thấy ${pick.length} giọng nam trầm. Bấm "Nghe thử giọng" để chọn giọng ưng ý.`; $('dubMsg').className = 'note okmsg';
+    ok = true; state.dubIssue = null;
   } catch (e) {
-    $('dubMsg').textContent = '✗ ' + (e.message || e) + ' — kiểm tra mạng rồi thử lại.'; $('dubMsg').className = 'note badmsg';
-    setDub({ on: false });
+    state.dubIssue = 'không chuẩn bị được giọng đọc (' + (e.message || e) + ')';
+    $('dubMsg').textContent = '✗ Không chuẩn bị được giọng đọc: ' + (e.message || e) + ' — kiểm tra mạng rồi bấm "Chuẩn bị giọng đọc" để thử lại.'; $('dubMsg').className = 'note badmsg';
   } finally {
-    state.scanning = false; $('dubScan').disabled = false; $('dubTry').disabled = false; show('dubBar', false);
+    state.scanning = false; $('dubScan').disabled = false; show('dubBar', false);
     state.ttsDl = state.ttsProg = null;
+    stopTTS();
     refreshDubUI();
   }
+  return ok;
 }
 $('dubOn').onchange = () => {
   setDub({ on: $('dubOn').checked });
   refreshDubUI();
   if ($('dubOn').checked && !getDub().voices?.length) scanVoices();
 };
-$('dubScan').onclick = scanVoices;
+$('dubScan').onclick = () => scanVoices();
 $('dubVoice').onchange = () => setDub({ sid: Number($('dubVoice').value) });
 $('dubBg').onchange = () => setDub({ bg: $('dubBg').value });
 $('target').addEventListener('change', refreshDubUI);
@@ -1572,8 +1585,9 @@ function runWorker(msg, transfer = []) {
 $('go').addEventListener('click', async () => {
   if (!state.file) return;
   // iPhone / lồng tiếng cần "mở khoá" trình phát ngay lúc bấm → không phải bấm thêm nút ở cuối
-  let prep = (isIOS || dubWanted()) ? prepRealtime(state.file) : null;
+  let prep = (isIOS || dubRequested()) ? prepRealtime(state.file) : null;
   $('go').disabled = true;
+  $('step2Title').textContent = 'Đang xử lý';
   show('step2'); show('runErr', false); show('step3', false); show('outBox', false); show('burnBtn', false); show('burnErr', false); $('editBox').open = false;
   $('step2').scrollIntoView({ behavior: 'smooth', block: 'start' });
   keepAwake(true);
@@ -1657,6 +1671,7 @@ $('go').addEventListener('click', async () => {
   } catch (e) {
     console.error(e);
     const oom = !e.cloud && isOOM(e);
+    $('step2Title').textContent = 'Có lỗi';
     $('runErr').textContent = e.cloud
       ? 'Lỗi: ' + e.message + '\nBạn có thể thử lại, hoặc tắt "AI đám mây" để chạy ngay trên máy.'
       : oom
@@ -2024,8 +2039,9 @@ async function doBurn(fromTap, prepIn = null) {
   if (burning) { dropRealtime(prepIn); return; }
   burning = true;
   // iPhone / lồng tiếng: lồng bằng cách phát & ghi (cách mã hoá nhanh làm Safari hết bộ nhớ và tự tải lại trang)
-  const dubOn = dubWanted();
-  const realtimeFirst = isIOS || dubOn;
+  const dubReq = dubRequested();
+  let dubOn = false, dubNote = '';
+  const realtimeFirst = isIOS || dubReq;
   const prep = prepIn || (fromTap ? prepRealtime(state.file) : null);   // phải tạo ngay lúc bấm, trước mọi "await"
   const segs = state.segments.map(s => ({ ...s })).sort((a, b) => a.start - b.start);
   // Giải phóng video cũ trước khi làm mới
@@ -2035,6 +2051,7 @@ async function doBurn(fromTap, prepIn = null) {
   const level = realtimeFirst ? 1 : pickProfile();   // phát & ghi không tốn bộ nhớ → giữ 540p
   saveJob({ stage: 'burning', segments: state.segments });
   show('step2'); show('runErr', false); show('burnErr', false); show('burnBtn', false); show('outBox', false);
+  $('step2Title').textContent = 'Đang xử lý';
   $('reburn').disabled = true;
   $('preview').pause();
   keepAwake(true);
@@ -2050,16 +2067,28 @@ async function doBurn(fromTap, prepIn = null) {
     $('stage').textContent = 'Đang lồng phụ đề vào video' + (level ? ` (chất lượng ${qLabel} cho nhẹ máy)…` : '…');
     $('sub').textContent = ''; setBar('bar', 0);
     let dub = null;
-    if (dubOn && prep) {
-      $('stage').textContent = 'Đang tạo giọng đọc tiếng Việt (chạy trên máy)…'; setBar('bar', 0);
+    if (dubReq && prep) {
       const t1 = performance.now();
-      const clips = await buildDub(segs,
-        (p) => { setBar('bar', p); const el = (performance.now() - t1) / 1000; $('sub').textContent = `${Math.round(p * 100)}%` + (p > 0.05 && p < 1 ? ` · còn khoảng ${fmtDur(el / p - el)}` : ''); },
-        (m) => { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `Đang tải ${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; });
-      stopTTS();   // giải phóng bộ nhớ của bộ đọc trước khi ghi video
-      (state.tm ||= []).push(['tạo giọng đọc (máy)', (performance.now() - t1) / 1000]);
-      dub = { clips, bg: getDub().bg };
-    }
+      try {
+        // Chưa có giọng → tự chuẩn bị ngay (lần đầu: tải ~45 MB và dò 65 giọng)
+        if (!getDub().voices?.length) {
+          $('stage').textContent = 'Lồng tiếng: đang chuẩn bị giọng đọc lần đầu (tải ~45 MB, dò giọng nam trầm)…'; setBar('bar', 0, true);
+          if (!await scanVoices(true)) throw new Error(state.dubIssue || 'không chuẩn bị được giọng đọc');
+        }
+        $('stage').textContent = 'Lồng tiếng: đang đọc lời phụ đề thành giọng nói (chạy trên máy)…'; setBar('bar', 0);
+        const clips = await buildDub(segs,
+          (p) => { setBar('bar', p); const el = (performance.now() - t1) / 1000; $('sub').textContent = `Đã đọc ${Math.round(p * 100)}% số câu` + (p > 0.05 && p < 1 ? ` · còn khoảng ${fmtDur(el / p - el)}` : ''); },
+          (m) => { setBar('bar', m.total ? m.loaded / m.total : 0, !m.total); $('sub').textContent = `Đang tải ${m.label}: ${fmtMB(m.loaded)}${m.total ? ' / ' + fmtMB(m.total) : ''}`; });
+        if (!clips.length) throw new Error('không có câu nào để đọc');
+        dub = { clips, bg: getDub().bg }; dubOn = true;
+      } catch (e) {
+        console.error('Lồng tiếng lỗi', e);
+        dubNote = String(e.message || e).replace(/^không chuẩn bị được giọng đọc \((.*)\)$/, 'không chuẩn bị được giọng đọc: $1');
+      } finally {
+        stopTTS();   // giải phóng bộ nhớ của bộ đọc trước khi ghi video
+        (state.tm ||= []).push(['tạo giọng đọc (máy)', (performance.now() - t1) / 1000]);
+      }
+    } else if (dubReq) dubNote = 'cần bấm lại nút để bắt đầu';
     try {
       if (realtimeFirst) throw new Error('IOS_REALTIME');
       const r = await burnFast(state.file, segs, prog, level);
@@ -2085,15 +2114,21 @@ async function doBurn(fromTap, prepIn = null) {
     state.outBlob = blob;
     state.outUrl = URL.createObjectURL(blob);
     const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
-    const name = `${baseName()}_phude-${subCode()}${dubOn ? '_longtieng' : ''}.${ext}`;
+    const name = `${baseName()}_phude-${subCode()}${dubOn ? '_longtieng' : ''}.${ext}`;   // dubOn = đã lồng tiếng thật
     $('dl').href = state.outUrl; $('dl').download = name;
     $('outVideo').src = state.outUrl;
-    $('stage').textContent = `Xong! Video đã có phụ đề ${subName()}` + (dubOn ? ' và giọng đọc lồng tiếng.' : '.');
+    $('stage').textContent = dubOn ? `✓ Hoàn tất! Video đã có phụ đề ${subName()} và giọng đọc tiếng Việt (đã ${Number(getDub().bg) ? 'giảm nhỏ' : 'tắt'} tiếng gốc).`
+      : dubReq ? `✓ Hoàn tất phụ đề — nhưng CHƯA lồng tiếng được (${dubNote}). Video vẫn giữ tiếng gốc.`
+      : `✓ Hoàn tất! Video đã có phụ đề ${subName()} (giữ tiếng gốc).`;
+    $('step2Title').textContent = 'Hoàn tất';
+    $('detected').querySelector('.audioPill')?.remove();
+    $('detected').insertAdjacentHTML('beforeend', ` <span class="pill audioPill${dubOn ? ' on' : ''}">${dubOn ? '🔊 Đã lồng tiếng Việt' : dubReq ? '⚠ Chưa lồng tiếng' : '🔈 Giữ tiếng gốc'}</span>`);
     const tm = (state.tm || []).filter(x => !/^tạo giọng|^lồng/.test(x[0]));
     const dubT = (state.tm || []).find(x => /^tạo giọng/.test(x[0]));
     const burnSec = (performance.now() - t0) / 1000 - (dubT ? dubT[1] : 0);
     const steps = [...tm, ...(dubT ? [dubT] : []), [realtimeFirst ? 'lồng chữ (máy, phát & ghi)' : 'lồng chữ (máy, nhanh)', burnSec]];
-    $('sub').innerHTML = `${fmtMB(blob.size)} · chất lượng ${qLabel}<br>Thời gian: ` + steps.map(([l, s]) => `${l} <b>${fmtDur(s)}</b>`).join(' · ');
+    $('sub').innerHTML = `${fmtMB(blob.size)} · chất lượng ${qLabel}<br>Thời gian: ` + steps.map(([l, s]) => `${l} <b>${fmtDur(s)}</b>`).join(' · ')
+      + (dubReq && !dubOn ? '<br>Muốn lồng tiếng: kéo lên mục "Lồng tiếng Việt", bấm "Chuẩn bị giọng đọc", rồi bấm "Lồng lại phụ đề đã sửa" trong mục Sửa lời phụ đề.' : '');
     state.tm = [];
     setBar('bar', 1);
     show('step3'); show('outBox');
@@ -2114,6 +2149,7 @@ async function doBurn(fromTap, prepIn = null) {
     show('step3');
     $('burnErr').textContent = 'Không lồng được phụ đề: ' + (e.message || e) + '\nBạn có thể bấm nút bên dưới để thử lại, hoặc tải file .srt trong mục "Sửa lời phụ đề".';
     show('burnErr'); show('burnBtn');
+    $('step2Title').textContent = 'Có lỗi'; $('stage').textContent = 'Có lỗi khi lồng phụ đề — xem chi tiết bên dưới.';
   } finally {
     if (!finished && loadJob()?.stage === 'burning') saveJob({ stage: 'ready' });
     burning = false;
