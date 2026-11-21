@@ -98,6 +98,18 @@ label.chk input{width:20px;height:20px;margin-top:2px;accent-color:var(--accent)
 .pill.audioPill.on{background:var(--ok);color:#fff}
 #dubBar{margin:0}
 .dubBody .btn{min-height:42px}
+details.ov{margin-top:14px;border:1px solid var(--line);border-radius:12px;padding:10px 14px}
+details.ov summary{cursor:pointer;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+details.ov .pill.on{background:var(--ok);color:#fff}
+.ovBody{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+.swatches{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding-top:4px}
+.swatches button{width:32px;height:32px;border-radius:50%;border:2px solid var(--line);cursor:pointer;padding:0}
+.swatches button.sel{outline:3px solid var(--accent);outline-offset:2px}
+.swatches input[type=color]{width:36px;height:34px;border:0;padding:0;background:none;cursor:pointer}
+.logoRow{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.logoRow img{width:56px;height:56px;object-fit:contain;border:1px solid var(--line);border-radius:8px;background:repeating-conic-gradient(#ccc 0 25%,#fff 0 50%) 0 0/12px 12px}
+.logoRow .btn{min-height:42px}
+#ovPreview{width:100%;height:auto;border-radius:10px;background:#000;display:block}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
 </style>
 </head>
@@ -169,6 +181,53 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}
       </label>
     </div>
     <div class="note hidden" id="targetNote"></div>
+
+    <details class="ov" id="ovBox">
+      <summary>Chữ &amp; logo trên video <span class="pill" id="ovBadge">Chưa dùng</span></summary>
+      <div class="ovBody">
+        <label class="f">Dòng chữ ở góc trên bên trái
+          <input type="text" id="ovText" maxlength="80" placeholder="Ví dụ: Tin quốc tế 24h" autocomplete="off">
+        </label>
+        <div class="grid" style="margin-top:0">
+          <label class="f">Cỡ chữ
+            <select id="ovSize">
+              <option value="0.035">Nhỏ</option>
+              <option value="0.05">Vừa</option>
+              <option value="0.07">Lớn</option>
+              <option value="0.09">Rất lớn</option>
+            </select>
+          </label>
+          <div class="f">Màu chữ
+            <div class="swatches" id="ovColors">
+              <button type="button" data-c="#ffffff" style="background:#ffffff" aria-label="Trắng"></button>
+              <button type="button" data-c="#ffe14d" style="background:#ffe14d" aria-label="Vàng"></button>
+              <button type="button" data-c="#ff3b30" style="background:#ff3b30" aria-label="Đỏ"></button>
+              <button type="button" data-c="#34c759" style="background:#34c759" aria-label="Xanh lá"></button>
+              <button type="button" data-c="#0a84ff" style="background:#0a84ff" aria-label="Xanh dương"></button>
+              <button type="button" data-c="#111111" style="background:#111111" aria-label="Đen"></button>
+              <input type="color" id="ovColor" value="#ffffff" aria-label="Màu khác">
+            </div>
+          </div>
+        </div>
+        <label class="chk"><input type="checkbox" id="ovBg" checked> <span>Nền mờ phía sau chữ (dễ đọc trên mọi cảnh)</span></label>
+        <label class="f">Logo ở góc dưới bên phải (ảnh PNG/JPG, nên có nền trong suốt)
+          <input type="file" id="ovLogo" accept="image/*">
+        </label>
+        <div class="logoRow hidden" id="ovLogoRow">
+          <img id="ovLogoImg" alt="Logo">
+          <label class="f" style="flex:1">Cỡ logo
+            <select id="ovLogoSize">
+              <option value="0.12">Nhỏ</option>
+              <option value="0.17">Vừa</option>
+              <option value="0.24">Lớn</option>
+            </select>
+          </label>
+          <button class="btn ghost" id="ovLogoDel" type="button">Xoá logo</button>
+        </div>
+        <canvas id="ovPreview" width="640" height="360"></canvas>
+        <div class="note" id="ovNote">Khung xem trước dùng hình trong video bạn chọn (chưa chọn video thì là khung mẫu).</div>
+      </div>
+    </details>
 
     <div class="dub" id="dubBox">
       <label class="chk"><input type="checkbox" id="dubOn"> <span><b>Lồng tiếng Việt</b>: tắt tiếng gốc và đọc lời phụ đề bằng giọng tiếng Việt</span></label>
@@ -1146,6 +1205,7 @@ async function onFileInner(file) {
   checkResume();
   $('go').textContent = goLabel();
   $('go').disabled = false;
+  grabPreviewFrame(file);
 }
 // Có phụ đề đã lưu cho đúng video + đúng ngôn ngữ → dùng lại, không chạy AI
 function checkResume() {
@@ -1899,17 +1959,17 @@ function drawSub(ctx, W, H, text) {
   let fs = Math.round(Math.min(W, H) * SUB_SIZE), lines;
   for (let tries = 0; tries < 3; tries++) {
     ctx.font = SUB_FONT(fs);
-    lines = wrapLines(ctx, text.trim(), W * 0.88);
+    lines = wrapLines(ctx, text.trim(), subArea(W, H).maxW);
     if (lines.length <= 2 || (tries === 2)) break;
     fs = Math.round(fs * 0.87);
   }
   if (lines.length > MAX_LINES) {
     lines = lines.slice(0, MAX_LINES);
     let last = lines[MAX_LINES - 1];
-    while (last.length > 1 && ctx.measureText(last + '…').width > W * 0.88) last = last.slice(0, -1);
+    while (last.length > 1 && ctx.measureText(last + '…').width > subArea(W, H).maxW) last = last.slice(0, -1);
     lines[MAX_LINES - 1] = last.trimEnd() + '…';
   }
-  const lh = fs * 1.3, bottom = H - Math.max(H * 0.06, fs * 0.8);
+  const lh = fs * 1.3, bottom = H - Math.max(H * 0.06, fs * 0.8) - subArea(W, H).lift;   // nâng lên nếu logo to
   const y0 = bottom - lh * (lines.length - 1) - lh / 2;
   lines.forEach((ln, i) => {
     const y = y0 + i * lh;
@@ -1931,6 +1991,132 @@ function makeCanvas(w, h) {
 }
 const even = (x) => Math.max(2, Math.round(x / 2) * 2);
 
+
+// ---------- CHỮ & LOGO TRÊN VIDEO ----------
+const OV_KEY = 'phudeviet_overlay_v1';
+function getOv() {
+  let o = {}; try { o = JSON.parse(localStorage.getItem(OV_KEY) || '{}'); } catch {}
+  return { text: o.text || '', size: Number(o.size) || 0.05, color: o.color || '#ffffff', bg: o.bg ?? true, logo: o.logo || null, logoSize: Number(o.logoSize) || 0.17 };
+}
+function setOv(p) {
+  try { localStorage.setItem(OV_KEY, JSON.stringify({ ...getOv(), ...p })); }
+  catch { $('ovNote').textContent = '⚠ Không lưu được cài đặt (ảnh logo quá lớn?). Logo vẫn dùng được cho lần này.'; }
+}
+let logoBmp = null, logoSrc = null;
+async function loadLogo(dataUrl) {
+  if (!dataUrl) { logoBmp = null; logoSrc = null; return; }
+  if (logoSrc === dataUrl && logoBmp) return;
+  const img = new Image(); img.src = dataUrl; await img.decode();
+  logoBmp = await createImageBitmap(img); logoSrc = dataUrl;
+}
+// Ảnh chụp cài đặt dùng khi vẽ (không đọc localStorage ở mỗi khung hình)
+async function prepareOverlay() {
+  const o = getOv();
+  try { await loadLogo(o.logo); } catch { logoBmp = null; }
+  state.ovSnap = { ...o, hasText: !!o.text.trim(), hasLogo: !!logoBmp };
+  if (!state.ovSnap.hasText && !state.ovSnap.hasLogo) state.ovSnap = null;
+}
+function ovLayout(W, H) {
+  const o = state.ovSnap, m = Math.round(Math.min(W, H) * 0.03);
+  let lw = 0, lh = 0;
+  if (o?.hasLogo && logoBmp) {
+    lw = Math.round(W * o.logoSize); lh = Math.round(lw * logoBmp.height / logoBmp.width);
+    if (lh > H * 0.28) { lh = Math.round(H * 0.28); lw = Math.round(lh * logoBmp.width / logoBmp.height); }
+  }
+  return { m, lw, lh };
+}
+function drawOverlay(ctx, W, H) {
+  const o = state.ovSnap; if (!o) return;
+  const { m, lw, lh } = ovLayout(W, H);
+  ctx.save();
+  if (o.hasText) {
+    let fs = Math.round(Math.min(W, H) * o.size);
+    const text = o.text.trim(), maxW = W - 2 * m - (o.bg ? fs * 0.6 : 0);
+    ctx.font = SUB_FONT(fs).replace(/^600/, '700');
+    while (fs > 10 && ctx.measureText(text).width > maxW) { fs = Math.round(fs * 0.92); ctx.font = SUB_FONT(fs).replace(/^600/, '700'); }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    const tw = ctx.measureText(text).width, padX = fs * 0.3, boxH = fs * 1.35;
+    const x = m, y = m + boxH / 2;
+    if (o.bg) { ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(x, m, tw + padX * 2, boxH); }
+    else { ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(2, fs * 0.12); ctx.strokeStyle = isDarkColor(o.color) ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.85)'; ctx.strokeText(text, x + padX, y); }
+    ctx.fillStyle = o.color; ctx.fillText(text, x + padX, y);
+  }
+  if (o.hasLogo && logoBmp && lw) { ctx.globalAlpha = 0.95; ctx.drawImage(logoBmp, W - m - lw, H - m - lh, lw, lh); }
+  ctx.restore();
+}
+function isDarkColor(hex) { const n = parseInt(hex.slice(1), 16); return ((n >> 16) * 0.299 + ((n >> 8) & 255) * 0.587 + (n & 255) * 0.114) < 90; }
+// Phụ đề tránh logo: thu hẹp bề ngang, hoặc nâng lên trên logo nếu logo to
+function subArea(W, H) {
+  const o = state.ovSnap; let maxW = W * 0.88, lift = 0;
+  if (o?.hasLogo && logoBmp) {
+    const { m, lw, lh } = ovLayout(W, H), nw = W - 2 * (lw + 2 * m);
+    if (nw >= W * 0.6) maxW = Math.min(maxW, nw); else lift = lh + m;
+  }
+  return { maxW, lift };
+}
+
+// --- Giao diện cài đặt ---
+function refreshOvUI(init = false) {
+  const o = getOv();
+  if (init) $('ovText').value = o.text;
+  $('ovSize').value = String(o.size); $('ovBg').checked = !!o.bg; $('ovColor').value = o.color;
+  document.querySelectorAll('#ovColors button').forEach(b => b.classList.toggle('sel', b.dataset.c.toLowerCase() === o.color.toLowerCase()));
+  show('ovLogoRow', !!o.logo);
+  if (o.logo) { $('ovLogoImg').src = o.logo; $('ovLogoSize').value = String(o.logoSize); }
+  const parts = [o.text.trim() && 'chữ', o.logo && 'logo'].filter(Boolean);
+  $('ovBadge').textContent = parts.length ? 'Đang dùng: ' + parts.join(' + ') : 'Chưa dùng';
+  $('ovBadge').classList.toggle('on', parts.length > 0);
+  renderOvPreview();
+}
+let ovTimer = null;
+$('ovText').addEventListener('input', () => { setOv({ text: $('ovText').value }); clearTimeout(ovTimer); ovTimer = setTimeout(refreshOvUI, 200); });
+$('ovSize').onchange = () => { setOv({ size: Number($('ovSize').value) }); refreshOvUI(); };
+$('ovBg').onchange = () => { setOv({ bg: $('ovBg').checked }); refreshOvUI(); };
+$('ovColor').addEventListener('input', () => { setOv({ color: $('ovColor').value }); refreshOvUI(); });
+document.querySelectorAll('#ovColors button').forEach(b => b.onclick = () => { setOv({ color: b.dataset.c }); refreshOvUI(); });
+$('ovLogoSize').onchange = () => { setOv({ logoSize: Number($('ovLogoSize').value) }); refreshOvUI(); };
+$('ovLogoDel').onclick = () => { setOv({ logo: null }); $('ovLogo').value = ''; refreshOvUI(); };
+$('ovLogo').addEventListener('change', async (e) => {
+  const f = e.target.files?.[0]; if (!f) return;
+  try {
+    const img = new Image(); img.src = URL.createObjectURL(f); await img.decode();
+    const k = Math.min(1, 512 / Math.max(img.naturalWidth, img.naturalHeight));   // thu nhỏ để lưu gọn
+    const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(img.src);
+    setOv({ logo: c.toDataURL('image/png') });
+    $('ovNote').textContent = 'Khung xem trước dùng hình trong video bạn chọn (chưa chọn video thì là khung mẫu).';
+  } catch { $('ovNote').textContent = '✗ Không đọc được ảnh logo này. Hãy thử ảnh PNG hoặc JPG.'; }
+  refreshOvUI();
+});
+
+// --- Khung xem trước ---
+async function grabPreviewFrame(file) {
+  state.ovFrame = null;
+  try {
+    const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto';
+    v.src = URL.createObjectURL(file);
+    await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; setTimeout(rej, 15000); });
+    await new Promise((res) => { v.onseeked = res; v.currentTime = Math.min(1.5, (v.duration || 2) / 3); setTimeout(res, 5000); });
+    state.ovFrame = await createImageBitmap(v);
+    URL.revokeObjectURL(v.src); v.removeAttribute('src'); v.load();
+  } catch {}
+  renderOvPreview();
+}
+async function renderOvPreview() {
+  const c = $('ovPreview'); if (!c) return;
+  const f = state.ovFrame;
+  const W = 640, H = f ? Math.round(640 * f.height / f.width) : 360;
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+  const ctx = c.getContext('2d');
+  if (f) ctx.drawImage(f, 0, 0, W, H);
+  else { const g = ctx.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#3a4a5c'); g.addColorStop(1, '#1d2530'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); }
+  await prepareOverlay();
+  drawSub(ctx, W, H, 'Phụ đề tiếng Việt sẽ hiện ở đây');
+  drawOverlay(ctx, W, H);
+}
+$('ovBox').addEventListener('toggle', () => { if ($('ovBox').open) renderOvPreview(); });
+refreshOvUI(true);
 
 // ---------- Mức chất lượng video xuất ra ----------
 // Điện thoại: giảm độ phân giải + bitrate để không hết bộ nhớ; mỗi lần trang bị tải lại thì giảm thêm 1 mức
@@ -2006,6 +2192,7 @@ async function burnFast(file, segs, onProg, level) {
         else ctx.drawImage(sample.toCanvasImageSource(), 0, 0, W, H);
         const i = cueIndex(segs, sample.timestamp);
         if (i >= 0) drawSub(ctx, W, H, segs[i].vi);
+        drawOverlay(ctx, W, H);
         return ctx.canvas;
       },
     };
@@ -2112,6 +2299,7 @@ async function burnRealtime(file, segs, onProg, prep, level = 0, dub = null) {
     ctx.drawImage(v, 0, 0, W, H);
     const i = cueIndex(segs, v.currentTime);
     if (i >= 0) drawSub(ctx, W, H, segs[i].vi);
+    drawOverlay(ctx, W, H);
     if (v.duration) onProg(v.currentTime / v.duration);
     tickDub();
   };
@@ -2175,6 +2363,7 @@ async function doBurn(fromTap, prepIn = null) {
     let blob, qLabel = PROFILES[level].label;
     $('stage').textContent = 'Đang lồng phụ đề vào video' + (level ? ` (chất lượng ${qLabel} cho nhẹ máy)…` : '…');
     $('sub').textContent = ''; setBar('bar', 0);
+    await prepareOverlay();
     let dub = null;
     if (dubReq && prep) {
       const t1 = performance.now();
